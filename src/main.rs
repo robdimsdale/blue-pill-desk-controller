@@ -34,15 +34,13 @@ fn main() -> ! {
     let mut ch0 = gpioa.pa0.into_analog(&mut gpioa.crl);
 
     // Set up the I2C bus
-    let afio = dp.AFIO.constrain(&mut rcc.apb2);
+    let mut afio = dp.AFIO.constrain(&mut rcc.apb2);
     let scl = gpiob.pb6.into_alternate_open_drain(&mut gpiob.crl);
     let sda = gpiob.pb7.into_alternate_open_drain(&mut gpiob.crl);
-    let mut mapr = afio.mapr;
     let mode = i2c::Mode::Standard {
         frequency: 100_000.hz(),
     };
 
-    let mut apb = rcc.apb1;
     let start_timeout_us: u32 = 10000;
     let start_retries: u8 = 5;
     let addr_timeout_us: u32 = 10000;
@@ -52,10 +50,10 @@ fn main() -> ! {
     let i2c = i2c::BlockingI2c::i2c1(
         dp.I2C1,
         (scl, sda),
-        &mut mapr,
+        &mut afio.mapr,
         mode,
         clocks,
-        &mut apb,
+        &mut rcc.apb1,
         start_timeout_us,
         start_retries,
         addr_timeout_us,
