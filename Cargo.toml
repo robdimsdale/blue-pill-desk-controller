@@ -1,0 +1,17 @@
+[package]
+name = "blue-pill-desk-controller"
+version = "0.1.0"
+authors = ["Rob Dimsdale-Zucker <robert.dimsdale@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+stm32f1xx-hal = { version = "0.7.0", features = ["rt", "stm32f103", "medium" ] }
+cortex-m = "0.6.0"
+cortex-m-rt = { version = "0.6.8", features = ["device"] }
+cortex-m-semihosting = "0.3.7"
+panic-semihosting = "0.5.6"
+
+ht16k33 = { version = "0.4.0", default-features = false }
+adafruit-7segment = { version = "0.1.0", default-features = false  }
+embedded-hal = "0.2.3"
+rotary-encoder-hal = "0.3.0"
