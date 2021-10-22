@@ -6,11 +6,10 @@ extern crate panic_semihosting;
 
 use cortex_m_rt::entry;
 use embedded_hal::digital::v2::InputPin;
-use stm32f1xx_hal::{i2c, prelude::*, stm32};
+use stm32f1xx_hal::{adc, i2c, prelude::*, stm32};
 
 use adafruit_7segment::{Index, SevenSegment};
 use ht16k33::{Dimming, Display, HT16K33};
-use rotary_encoder_hal::{Direction, Rotary};
 
 #[entry]
 fn main() -> ! {
@@ -24,10 +23,15 @@ fn main() -> ! {
         .use_hse(8.mhz())
         .sysclk(72.mhz())
         .pclk1(36.mhz())
+        .adcclk(2.mhz())
         .freeze(&mut flash.acr);
 
     let mut gpioa = dp.GPIOA.split(&mut rcc.apb2);
     let mut gpiob = dp.GPIOB.split(&mut rcc.apb2);
+
+    // Setup ADC
+    let mut adc1 = adc::Adc::adc1(dp.ADC1, &mut rcc.apb2, clocks);
+    let mut ch0 = gpioa.pa0.into_analog(&mut gpioa.crl);
 
     // Set up the I2C bus
     let afio = dp.AFIO.constrain(&mut rcc.apb2);
@@ -61,43 +65,49 @@ fn main() -> ! {
     const DISP_I2C_ADDR: u8 = 112;
 
     let mut ht16k33 = HT16K33::new(i2c, DISP_I2C_ADDR);
+
     ht16k33.initialize().expect("Failed to initialize ht16k33");
+
     ht16k33
         .set_display(Display::ON)
         .expect("Could not turn on the display!");
+
     ht16k33
         .set_dimming(Dimming::BRIGHTNESS_MAX)
         .expect("Could not set dimming!");
 
-    let pin_a = gpioa.pa12.into_pull_up_input(&mut gpioa.crh);
-    let pin_b = gpioa.pa10.into_pull_up_input(&mut gpioa.crh);
-
-    let mut enc = Rotary::new(pin_a, pin_b);
-    let mut pos: f32 = 65.0;
-
     let min_pos = 65.0;
     let max_pos = 127.5;
 
+    let adc_max = 4096.0; // 12-bit ADC i.e. 2^12
+
     let pin_switch = gpiob.pb11.into_pull_up_input(&mut gpiob.crh);
 
+    let mut current_data: u16 = 0;
+
+    // The total range is 127-65.5 = 62.5
+    // and each 0.5 cm is a step so 62.5 * 2 = 125 steps
+    // This is a bit under 2^7 (2^7=128)
+    // The ADC is 12-bits (i.e. 2^12) but we only really need a bit under 2^7
+    // so the max threshold can be a bit over 2^(12-7) = 2^5 = 32
+    // Set the threshold to 32 to provide a bit of headroom while still providing good noise
+    // reduction
+    // Humans will not change the value back and forth fast enough for signal to be at the same
+    // frequency as the noise.
+    let threshold: u16 = 32;
+
     loop {
-        match enc.update().unwrap() {
-            Direction::Clockwise => {
-                pos += 0.5;
-            }
-            Direction::CounterClockwise => {
-                pos -= 0.5;
-            }
-            Direction::None => {}
+        let new_data: u16 = adc1
+            .read(&mut ch0)
+            .expect("Failed to read analog value on ADC1");
+        if abs_diff(new_data, current_data) > threshold {
+            current_data = new_data;
         }
+        let ratio = current_data as f32 / adc_max;
 
-        if pos < min_pos {
-            pos = min_pos
-        }
+        let mut pos: f32 = ratio * (max_pos - min_pos) + min_pos;
 
-        if pos > max_pos {
-            pos = max_pos
-        }
+        pos = to_nearest_zero_point_five(pos);
 
         if pin_switch.is_low().unwrap() {
             ht16k33
@@ -114,5 +124,20 @@ fn main() -> ! {
             .unwrap();
 
         ht16k33.write_display_buffer().unwrap();
+    }
+}
+
+fn to_nearest_zero_point_five(val: f32) -> f32 {
+    let round_to_nearest = 0.5;
+    let x = val / round_to_nearest;
+    let rounded = x as u16;
+    return rounded as f32 * round_to_nearest;
+}
+
+fn abs_diff(a: u16, b: u16) -> u16 {
+    if a > b {
+        return a - b;
+    } else {
+        return b - a;
     }
 }

@@ -14,4 +14,3 @@ panic-semihosting = "0.5.6"
 ht16k33 = { version = "0.4.0", default-features = false }
 adafruit-7segment = { version = "0.1.0", default-features = false  }
 embedded-hal = "0.2.3"
-rotary-encoder-hal = "0.3.0"
