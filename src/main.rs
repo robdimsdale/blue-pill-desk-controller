@@ -76,6 +76,7 @@ fn main() -> ! {
 
     let min_pos = 65.0;
     let max_pos = 127.5;
+    let step_size = 0.5;
 
     let adc_max = 4096.0; // 12-bit ADC i.e. 2^12
 
@@ -83,15 +84,12 @@ fn main() -> ! {
 
     let mut current_data: u16 = 0;
 
-    // The total range is 127-65.5 = 62.5
-    // and each 0.5 cm is a step so 62.5 * 2 = 125 steps
-    // This is a bit under 2^7 (2^7=128)
-    // The ADC is 12-bits (i.e. 2^12) but we only really need a bit under 2^7
-    // so the max threshold can be a bit over 2^(12-7) = 2^5 = 32
-    // Set the threshold to 32 to provide a bit of headroom while still providing good noise
-    // reduction
-    // Humans will not change the value back and forth fast enough for signal to be at the same
-    // frequency as the noise.
+    // The total range is 127-65.5 = 62.5 and each 0.5 cm is a step so 62.5 * 2 = 125 steps.
+    // The ADC is 12-bits (i.e. 2^12) but we only really need 125 (i.e. a bit under 2^7),
+    // therefore the max threshold can be a bit over 2^(12-7) = 2^5 = 32.
+    // Set the threshold to 32 to provide a bit of headroom while still providing good noise reduction.
+    // Humans will not adjust the value back and forth fast enough for any meaningful signal to be near
+    // the same frequency as the noise.
     let threshold: u16 = 32;
 
     loop {
@@ -105,7 +103,7 @@ fn main() -> ! {
 
         let mut pos: f32 = ratio * (max_pos - min_pos) + min_pos;
 
-        pos = to_nearest_zero_point_five(pos);
+        pos = round_to_nearest(pos, step_size);
 
         if pin_switch.is_low().unwrap() {
             ht16k33
@@ -125,11 +123,9 @@ fn main() -> ! {
     }
 }
 
-fn to_nearest_zero_point_five(val: f32) -> f32 {
-    let round_to_nearest = 0.5;
-    let x = val / round_to_nearest;
-    let rounded = x as u16;
-    return rounded as f32 * round_to_nearest;
+fn round_to_nearest(val: f32, round_to: f32) -> f32 {
+    let rounded_multiple = (val / round_to) as u16;
+    return rounded_multiple as f32 * round_to;
 }
 
 fn abs_diff(a: u16, b: u16) -> u16 {
