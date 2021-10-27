@@ -8,6 +8,8 @@ edition = "2018"
 stm32f1xx-hal = { version = "0.7.0", features = ["rt", "stm32f103", "medium" ] }
 cortex-m = "0.6.0"
 cortex-m-rt = { version = "0.6.8", features = ["device"] }
+cortex-m-rtic = "0.6.0-alpha.5"
+
 cortex-m-semihosting = "0.3.7"
 panic-semihosting = "0.5.6"
 
