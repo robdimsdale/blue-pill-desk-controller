@@ -37,10 +37,29 @@ mod app {
 
         use crate::protocol::*;
 
-        // Should be a multiple of DATA_FRAME_SIZE
+        // Should be a multiple of DATA_FRAME_SIZE to ensure Tx is always a whole number of frames
         const BUF_SIZE: usize = DATA_FRAME_SIZE * 5;
 
-        const ADC_BUF_SIZE: usize = 35;
+        // Should be large enough to allow average (de-noising) and reduce interrupt frequency,
+        // while also small enough not to negatively impact response.
+        // Empirically, around 32 feels response enough without any noticeable noise.
+        const ADC_BUF_SIZE: usize = 32;
+
+        // The total range is 127-65.5 = 62.5 and each 0.5 cm is a step so 62.5 * 2 = 125 steps.
+        // The ADC is 12-bits (i.e. 2^12) but we only really need 125 (i.e. a bit under 2^7),
+        // therefore the max threshold can be a bit over 2^(12-7) = 2^5 = 32.
+        // Set the threshold to 16 to provide good noise reduction
+        // while also not losing too much signal from small (i.e. slow) movements.
+        // We observe that lower than around 16 tends to result in noticeable noise,
+        // and more than around 16 tends to result in noticeable loss of precision,
+        // especially at the max value.
+        const ADC_SMOOTH_THRESHOLD: u16 = 16;
+
+        // 12-bit ADC i.e. 2^12
+        // However, due to intrinsic resistance, we can't ever get to the max value.
+        // We empirically observe a typical max value is about 4090.
+        // We also want to set this lower to account for de-noising (averaging)
+        const ADC_MAX_VALUE: u16 = 4070;
 
         pub enum TxTransfer {
             Running(Transfer<R, &'static mut [u8; BUF_SIZE], TxDma<Tx<USART3>, C2>>),
@@ -71,7 +90,7 @@ mod app {
             adc_recv: Option<
                 Transfer<
                     W,
-                    &'static mut [u16; BUF_SIZE],
+                    &'static mut [u16; ADC_BUF_SIZE],
                     RxDma<AdcPayload<gpioa::PA0<Analog>, Continuous>, C1>,
                 >,
             >,
@@ -273,9 +292,18 @@ mod app {
         #[task(binds = DMA1_CHANNEL1, local = [adc_recv,current_adc_pos], shared = [disp], priority = 1)]
         fn on_adc_read(ctx: on_adc_read::Context) {
             let (rx_buf, rx) = ctx.local.adc_recv.take().unwrap().wait();
-            let new_position = rx_buf[0];
 
-            let height = normalize_input_height(*ctx.local.current_adc_pos, new_position);
+            // Cast to u32 to enable summation as u32 and avoid overrun which would often occur
+            // if we tried to sum as u16.
+            // The max value in the buffer is 2^12 - 1, and the max u16 value is 2^16 - 1,
+            // and the buffer size is 35.
+            // 35 * (2^12 - 1) > 2^16-1, hence overrun
+            let avg =
+                (&rx_buf.iter().map(|&x| x as u32).sum::<u32>() / (rx_buf.len() as u32)) as u16;
+
+            let new_position = threshold_smooth_adc(avg, *ctx.local.current_adc_pos);
+
+            let height = normalize_input_height(new_position);
             *ctx.local.current_adc_pos = new_position;
 
             ctx.shared
@@ -287,27 +315,30 @@ mod app {
             ctx.local.adc_recv.replace(rx.read(rx_buf));
         }
 
-        fn normalize_input_height(current_position: u16, new_position: u16) -> f32 {
+        fn threshold_smooth_adc(val: u16, prev_val: u16) -> u16 {
+            let h = if abs_diff(val, prev_val) > ADC_SMOOTH_THRESHOLD {
+                val
+            } else {
+                prev_val
+            };
+
+            return h;
+        }
+
+        fn abs_diff(a: u16, b: u16) -> u16 {
+            if a > b {
+                return a - b;
+            } else {
+                return b - a;
+            }
+        }
+
+        fn normalize_input_height(adc_pos: u16) -> f32 {
             let min_pos = 65.0;
             let max_pos = 127.5;
             let step_size = 0.5;
 
-            let adc_max = 4096.0; // 12-bit ADC i.e. 2^12
-
-            // The total range is 127-65.5 = 62.5 and each 0.5 cm is a step so 62.5 * 2 = 125 steps.
-            // The ADC is 12-bits (i.e. 2^12) but we only really need 125 (i.e. a bit under 2^7),
-            // therefore the max threshold can be a bit over 2^(12-7) = 2^5 = 32.
-            // Set the threshold to 32 to provide a bit of headroom while still providing good noise reduction.
-            // Humans will not adjust the value back and forth fast enough for any meaningful signal to be near
-            // the same frequency as the noise.
-            let threshold: u16 = 32;
-
-            let h = if abs_diff(new_position, current_position) > threshold {
-                new_position
-            } else {
-                current_position
-            };
-            let ratio = h as f32 / adc_max;
+            let ratio = adc_pos as f32 / ADC_MAX_VALUE as f32;
 
             let mut pos: f32 = ratio * (max_pos - min_pos) + min_pos;
 
@@ -318,15 +349,8 @@ mod app {
 
         fn round_to_nearest(val: f32, round_to: f32) -> f32 {
             let rounded_multiple = (val / round_to) as u16;
-            return rounded_multiple as f32 * round_to;
-        }
-
-        fn abs_diff(a: u16, b: u16) -> u16 {
-            if a > b {
-                return a - b;
-            } else {
-                return b - a;
-            }
+            let x = rounded_multiple as f32 * round_to;
+            return x;
         }
     }
 }
