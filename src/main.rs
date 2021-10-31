@@ -12,7 +12,7 @@ use panic_semihosting as _; // panic handler
 
 // from: https://github.com/kalkyl/f103-rtic/blob/main/src/bin/serial.rs
 mod app {
-    #[rtic::app(device = stm32f1xx_hal::pac, peripherals = true, dispatchers = [EXTI1,EXTI2])]
+    #[rtic::app(device = stm32f1xx_hal::pac, peripherals = true, dispatchers = [EXTI2,EXTI3])]
     mod app {
         use stm32f1xx_hal::{
             adc,
@@ -21,7 +21,7 @@ mod app {
                 dma1::{C1, C2, C3},
                 Event, RxDma, Transfer, TxDma, R, W,
             },
-            gpio::{gpioa, gpiob, Alternate, Analog, OpenDrain},
+            gpio::{gpioa, gpiob, Alternate, Analog, Edge, ExtiPin, Input, OpenDrain, PullUp},
             i2c,
             pac::{I2C1, USART3},
             prelude::*,
@@ -34,6 +34,7 @@ mod app {
 
         use cortex_m_semihosting::hprintln;
         use stm32f1xx_hal::adc::{AdcPayload, SampleTime};
+        use stm32f1xx_hal::gpio::gpiob::PB11;
 
         use crate::protocol::*;
 
@@ -125,6 +126,8 @@ mod app {
             stable_iteration_count: u16,
             previous_iteration_height: f32,
 
+            button: gpiob::PB1<Input<PullUp>>,
+
             recv: Option<Transfer<W, &'static mut [u8; RX_BUF_SIZE], RxDma<Rx<USART3>, C3>>>,
 
             adc_recv: Option<
@@ -139,7 +142,7 @@ mod app {
         }
 
         #[init(local = [rx_buf: [u8; RX_BUF_SIZE] = [0; RX_BUF_SIZE], tx_buf: [u8; TX_BUF_SIZE] = [0; TX_BUF_SIZE], adc_buf: [u16; ADC_BUF_SIZE] = [0; ADC_BUF_SIZE]])]
-        fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
+        fn init(mut ctx: init::Context) -> (Shared, Local, init::Monotonics) {
             let mut rcc = ctx.device.RCC.constrain();
             let mut flash = ctx.device.FLASH.constrain();
 
@@ -156,6 +159,12 @@ mod app {
 
             let mut dma_channels = ctx.device.DMA1.split(&mut rcc.ahb);
             dma_channels.1.listen(Event::TransferComplete);
+
+            // Setup button
+            let mut button = gpiob.pb1.into_pull_up_input(&mut gpiob.crl);
+            button.make_interrupt_source(&mut afio);
+            button.enable_interrupt(&mut ctx.device.EXTI);
+            button.trigger_on_edge(&mut ctx.device.EXTI, Edge::FALLING);
 
             // Setup ADC on pin PA0 (potentiometer input)
             let mut adc1 = adc::Adc::adc1(ctx.device.ADC1, &mut rcc.apb2, clocks);
@@ -237,6 +246,7 @@ mod app {
                     current_direction: None,
                     stable_iteration_count: 0,
                     previous_iteration_height: 0.0,
+                    button: button,
                 },
                 init::Monotonics(),
             )
@@ -368,7 +378,7 @@ mod app {
                                 }
                             }
                             None => {
-                                panic!("at target height - rest of code not implemented");
+                                // panic!("at target height - rest of code not implemented");
                             }
                         },
                     }
@@ -472,6 +482,16 @@ mod app {
                 // defmt::info!("Sent {:?}", tx_buf);
                 send.replace(TxTransfer::Idle(tx_buf, tx));
             });
+        }
+
+        // Triggers on button pressed
+        #[task(binds = EXTI1, local = [button], shared = [disp], priority = 1)]
+        fn on_btn_press(ctx: on_btn_press::Context) {
+            let button = ctx.local.button;
+            if button.check_interrupt() {
+                button.clear_interrupt_pending_bit();
+                hprintln!("b").unwrap();
+            }
         }
 
         // Triggers on ADC read completed
