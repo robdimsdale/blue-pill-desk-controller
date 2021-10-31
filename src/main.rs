@@ -43,8 +43,8 @@ mod app {
         // Typically can go as low as 16 bytes as long as there are no delays (e.g. hprintln! calls)
         // Simple hprintln! calls require 512 or more
         // Going too small increases the risk of having a corrupted + incomplete frame.
-        const RX_BUF_SIZE: usize = 16;
-        // const RX_BUF_SIZE: usize = 32;
+        // const RX_BUF_SIZE: usize = 16;
+        const RX_BUF_SIZE: usize = 32;
         // const RX_BUF_SIZE: usize = 64;
         // const RX_BUF_SIZE: usize = 256;
         // const RX_BUF_SIZE: usize = 1024;
@@ -52,14 +52,17 @@ mod app {
         // Should be a multiple of DATA_FRAME_SIZE to ensure Tx is always a whole number of frames
         // Should always be smaller than RX_BUF_SIZE to avoid trying to send more than fits
         // in the RX-interrupt-driven loop
-        const TX_BUF_SIZE: usize = DATA_FRAME_SIZE * 2;
-        // const TX_BUF_SIZE: usize = DATA_FRAME_SIZE * 5;
+        // const TX_BUF_SIZE: usize = DATA_FRAME_SIZE * 2;
+        const TX_BUF_SIZE: usize = DATA_FRAME_SIZE * 4;
         // const TX_BUF_SIZE: usize = DATA_FRAME_SIZE * 8;
         // const TX_BUF_SIZE: usize = DATA_FRAME_SIZE * 35;
         // const TX_BUF_SIZE: usize = 256;
 
         // This is inversely proportional to TX_BUF_SIZE, as there is a minimum amount of time the
         // "no key" signal must be sent for.
+        // Aim for at least 150ms of "no key" between other messages.
+        // At 9600 baud, each byte takes about 1ms, so for a TX_BUF of DATA_FRAME_SIZE * 4 (i.e. 28)
+        // we should choose a NO_KEY_SPAWN_COUNT of around 6
         // const NO_KEY_SPAWN_COUNT: u16 = 3;
         const NO_KEY_SPAWN_COUNT: u16 = 6;
 
@@ -84,7 +87,8 @@ mod app {
         // 12-bit ADC i.e. 2^12
         // However, due to intrinsic resistance, we can't ever get to the max value.
         // We empirically observe a typical max value is about 4090.
-        // We also want to set this lower to account for de-noising (averaging)
+        // We also want to set this lower to account for de-noising (averaging),
+        // and to ensure we reliably get to the max even if the input is moving very slowly
         const ADC_MAX_VALUE: u16 = 4070;
 
         pub enum TxTransfer {
