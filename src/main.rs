@@ -12,7 +12,7 @@ use panic_semihosting as _; // panic handler
 
 // from: https://github.com/kalkyl/f103-rtic/blob/main/src/bin/serial.rs
 mod app {
-    #[rtic::app(device = stm32f1xx_hal::pac, peripherals = true, dispatchers = [EXTI1])]
+    #[rtic::app(device = stm32f1xx_hal::pac, peripherals = true, dispatchers = [EXTI1,EXTI2])]
     mod app {
         use stm32f1xx_hal::{
             adc,
@@ -37,8 +37,16 @@ mod app {
 
         use crate::protocol::*;
 
+        // Typically can go as low as 64 bytes as long as there are no delays (e.g. hprintln! calls)
+        // Simple hprintln! calls require 512 or so
+        const RX_BUF_SIZE: usize = 64;
+        // const RX_BUF_SIZE: usize = 256;
+        // const RX_BUF_SIZE: usize = 1024;
+
         // Should be a multiple of DATA_FRAME_SIZE to ensure Tx is always a whole number of frames
-        const BUF_SIZE: usize = DATA_FRAME_SIZE * 5;
+        const TX_BUF_SIZE: usize = DATA_FRAME_SIZE * 8;
+        // const TX_BUF_SIZE: usize = DATA_FRAME_SIZE * 35;
+        // const TX_BUF_SIZE: usize = 256;
 
         // Should be large enough to allow average (de-noising) and reduce interrupt frequency,
         // while also small enough not to negatively impact response.
@@ -61,17 +69,35 @@ mod app {
         // We also want to set this lower to account for de-noising (averaging)
         const ADC_MAX_VALUE: u16 = 4070;
 
+        // Set to around 4 when using hprintln statements and larger tx/rx buffers
+        const TX_REPEAT_TIMES: u16 = 1;
+
+        // TODO: move to protocol module
+        // Set to a lower number when larger buffers are being used
+        const NO_KEY_ITERATION_COUNT: u16 = 5;
+        // const NO_KEY_ITERATION_COUNT: u16 = 4;
+        // const NO_KEY_ITERATION_COUNT: u16 = 1;
+
+        const NO_KEY_SPAWN_COUNT: u16 = 20;
+
         pub enum TxTransfer {
-            Running(Transfer<R, &'static mut [u8; BUF_SIZE], TxDma<Tx<USART3>, C2>>),
-            Idle(&'static mut [u8; BUF_SIZE], TxDma<Tx<USART3>, C2>),
+            Running(Transfer<R, &'static mut [u8; TX_BUF_SIZE], TxDma<Tx<USART3>, C2>>),
+            Idle(&'static mut [u8; TX_BUF_SIZE], TxDma<Tx<USART3>, C2>),
+        }
+
+        #[derive(Clone, Copy)]
+        pub enum Direction {
+            Up,
+            Down,
+            Reversing,
         }
 
         #[shared]
         struct Shared {
-            #[lock_free]
+            // TODO: ensure that this doesn't actually result in a deadlock due to the use of
+            // transfer.wait() after getting the lock.
             send: Option<TxTransfer>,
 
-            #[lock_free]
             disp: HT16K33<
                 i2c::BlockingI2c<
                     I2C1,
@@ -81,11 +107,17 @@ mod app {
                     ),
                 >,
             >,
+
+            target_height: Option<f32>,
+            current_height: f32,
         }
 
         #[local]
         struct Local {
-            recv: Option<Transfer<W, &'static mut [u8; BUF_SIZE], RxDma<Rx<USART3>, C3>>>,
+            no_key_send_count: u16,
+            current_direction: Option<Direction>,
+
+            recv: Option<Transfer<W, &'static mut [u8; RX_BUF_SIZE], RxDma<Rx<USART3>, C3>>>,
 
             adc_recv: Option<
                 Transfer<
@@ -98,7 +130,7 @@ mod app {
             current_adc_pos: u16,
         }
 
-        #[init(local = [rx_buf: [u8; BUF_SIZE] = [0; BUF_SIZE], tx_buf: [u8; BUF_SIZE] = [0; BUF_SIZE], adc_buf: [u16; ADC_BUF_SIZE] = [0; ADC_BUF_SIZE]])]
+        #[init(local = [rx_buf: [u8; RX_BUF_SIZE] = [0; RX_BUF_SIZE], tx_buf: [u8; TX_BUF_SIZE] = [0; TX_BUF_SIZE], adc_buf: [u16; ADC_BUF_SIZE] = [0; ADC_BUF_SIZE]])]
         fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
             let mut rcc = ctx.device.RCC.constrain();
             let mut flash = ctx.device.FLASH.constrain();
@@ -178,15 +210,24 @@ mod app {
             let tx = tx_serial.with_dma(dma_channels.2);
             let rx = rx_serial.with_dma(dma_channels.3);
 
+            for _ in 0..NO_KEY_SPAWN_COUNT {
+                send_message::spawn(PanelToDeskMessage::NoKey).unwrap();
+            }
+
+            let temp_target_height = 71.5;
             (
                 Shared {
                     send: Some(TxTransfer::Idle(ctx.local.tx_buf, tx)),
                     disp: ht16k33,
+                    target_height: Some(temp_target_height),
+                    current_height: 0.0,
                 },
                 Local {
                     recv: Some(rx.read(ctx.local.rx_buf)),
                     adc_recv: Some(adc_dma.read(ctx.local.adc_buf)),
                     current_adc_pos: 0,
+                    no_key_send_count: 0,
+                    current_direction: None,
                 },
                 init::Monotonics(),
             )
@@ -195,50 +236,46 @@ mod app {
         #[idle]
         fn idle(_: idle::Context) -> ! {
             loop {
-                // hprintln!("i").unwrap();
                 asm::wfi();
             }
         }
 
         // Triggers on RX transfer completed
-        #[task(binds = DMA1_CHANNEL3, local = [recv], priority = 2)]
+        #[task(binds = DMA1_CHANNEL3, local = [recv], priority = 3)]
         fn on_rx(ctx: on_rx::Context) {
             let (rx_buf, rx) = ctx.local.recv.take().unwrap().wait();
-            read_height::spawn(*rx_buf).ok();
+            read_height::spawn(*rx_buf).unwrap();
             ctx.local.recv.replace(rx.read(rx_buf));
         }
 
-        #[task(shared = [disp], priority = 1, capacity = 8)]
-        fn read_height(ctx: read_height::Context, data: [u8; BUF_SIZE]) {
-            // hprintln!("{:?}", data[0]).unwrap();
-            let mut height = 0.;
+        #[task(shared = [disp, current_height], priority = 2, capacity = 2)]
+        fn read_height(mut ctx: read_height::Context, data: [u8; RX_BUF_SIZE]) {
             let frame = find_first_frame(&data);
             if validate_frame(&frame) {
                 match DeskToPanelMessage::from_frame(&frame) {
-                    DeskToPanelMessage::Height(x) => {
-                        height = x;
+                    DeskToPanelMessage::Height(h) => {
+                        ctx.shared.current_height.lock(|current_height| {
+                            *current_height = h;
+                        });
+
+                        ctx.shared.disp.lock(|disp| {
+                            disp.update_buffer_with_float(Index::One, h, 1, 10).unwrap();
+                            disp.write_display_buffer().unwrap();
+                        });
+
+                        // Explicitly ignore a failed spawn attempt.
+                        // We do not care if we miss an opportunity to potentially send a message
+                        // as we will catch it next time we enter this function.
+                        let _ = compare_height::spawn();
                     }
                     DeskToPanelMessage::Unknown(a, b, c, d, e) => {
                         // do nothing for now
                     }
                 }
             }
-
-            // ctx.local
-            //     .disp
-            //     .update_buffer_with_float(Index::One, height, 1, 10);
-            // ctx.local.disp.write_display_buffer().unwrap();
-            //
-            // if height < 75.0 {
-            //     send_message::spawn(PanelToDeskMessage::Up);
-            // } else if height >= 65.0 {
-            //     send_message::spawn(PanelToDeskMessage::Down);
-            // } else {
-            //     send_message::spawn(PanelToDeskMessage::NoKey);
-            // }
         }
 
-        fn find_first_frame(buf: &[u8; BUF_SIZE]) -> [u8; DATA_FRAME_SIZE] {
+        fn find_first_frame(buf: &[u8; RX_BUF_SIZE]) -> [u8; DATA_FRAME_SIZE] {
             let mut frame = [0; DATA_FRAME_SIZE];
             for (i, x) in buf.iter().enumerate() {
                 if is_start_byte(*x) {
@@ -249,24 +286,135 @@ mod app {
             return [0; DATA_FRAME_SIZE];
         }
 
-        #[task(shared = [send], priority = 1, capacity = 1)]
-        fn send_message(ctx: send_message::Context, message: PanelToDeskMessage) {
-            // defmt::info!("Received {:?}", data);
-            let send = ctx.shared.send;
-            let (tx_buf, tx) = match send.take().unwrap() {
-                TxTransfer::Idle(buf, tx) => (buf, tx),
-                TxTransfer::Running(transfer) => transfer.wait(),
-            };
-            let b = &fill_buffer_with_message(message);
-            //hprintln!("{:?}", b).unwrap();
-            //asm::bkpt();
-            tx_buf.copy_from_slice(&fill_buffer_with_message(message));
-            send.replace(TxTransfer::Running(tx.write(tx_buf)));
+        #[task(local = [no_key_send_count,current_direction], shared = [current_height, target_height], priority = 1, capacity = 1)]
+        fn compare_height(mut ctx: compare_height::Context) {
+            let mut current_direction = *ctx.local.current_direction;
+            let mut no_key_send_count = *ctx.local.no_key_send_count;
+            let mut message = None;
+
+            (ctx.shared.current_height, ctx.shared.target_height).lock(
+                |current_height, ctx_target_height| match current_direction {
+                    Some(Direction::Reversing) => {
+                        // if no_key_send_count < NO_KEY_ITERATION_COUNT {
+                        //     message = Some(PanelToDeskMessage::NoKey);
+                        // } else {
+                        current_direction = None;
+                        // }
+                    }
+                    _ => match *ctx_target_height {
+                        Some(target_height) => {
+                            if *current_height < target_height {
+                                match current_direction {
+                                    Some(Direction::Down) => {
+                                        current_direction = Some(Direction::Reversing);
+                                        message = Some(PanelToDeskMessage::NoKey);
+                                    }
+                                    _ => {
+                                        current_direction = Some(Direction::Up);
+                                        message = Some(PanelToDeskMessage::Up);
+                                    }
+                                }
+                            } else if *current_height > target_height {
+                                match current_direction {
+                                    Some(Direction::Up) => {
+                                        current_direction = Some(Direction::Reversing);
+                                        message = Some(PanelToDeskMessage::NoKey);
+                                    }
+                                    _ => {
+                                        current_direction = Some(Direction::Down);
+                                        message = Some(PanelToDeskMessage::Down);
+                                    }
+                                }
+                            } else {
+                                current_direction = None;
+                                if no_key_send_count < NO_KEY_ITERATION_COUNT {
+                                    message = Some(PanelToDeskMessage::NoKey);
+                                } else {
+                                    *ctx_target_height = None;
+                                }
+                            }
+                        }
+                        None => {
+                            panic!("at target height - rest of code not implemented");
+                        }
+                    },
+                },
+            );
+
+            // // TODO: remove references to this once we're happy with the multiple spawn behavior
+            // no_key_send_count = NO_KEY_SEND_COUNT;
+
+            match message {
+                Some(PanelToDeskMessage::NoKey) => {
+                    no_key_send_count += 1;
+                }
+                _ => {
+                    no_key_send_count = 0;
+                }
+            }
+
+            // match message {
+            //     Some(PanelToDeskMessage::Up) => {
+            //         hprintln!("u").unwrap();
+            //     }
+            //     Some(PanelToDeskMessage::Down) => {
+            //         hprintln!("d").unwrap();
+            //     }
+            //     Some(PanelToDeskMessage::NoKey) => {
+            //         hprintln!("k, {}", no_key_send_count).unwrap();
+            //         match current_direction {
+            //             Some(Direction::Reversing) => {
+            //                 hprintln!("dr").unwrap();
+            //             }
+            //             Some(Direction::Up) => {
+            //                 hprintln!("du").unwrap();
+            //             }
+            //             Some(Direction::Down) => {
+            //                 hprintln!("dd").unwrap();
+            //             }
+            //             None => {
+            //                 hprintln!("dn").unwrap();
+            //             }
+            //         }
+            //     }
+            //     None => {
+            //         hprintln!("n").unwrap();
+            //     }
+            //     _ => {}
+            // }
+
+            *ctx.local.no_key_send_count = no_key_send_count;
+            *ctx.local.current_direction = current_direction;
+
+            match message {
+                Some(PanelToDeskMessage::NoKey) => {
+                    for _ in 0..NO_KEY_SPAWN_COUNT {
+                        send_message::spawn(PanelToDeskMessage::NoKey).unwrap();
+                    }
+                }
+                Some(m) => {
+                    send_message::spawn(m).unwrap();
+                }
+                None => {}
+            }
         }
 
-        fn fill_buffer_with_message(message: PanelToDeskMessage) -> [u8; BUF_SIZE] {
-            let mut buf = [0; BUF_SIZE];
-            for i in 0..(BUF_SIZE / DATA_FRAME_SIZE) - 1 {
+        #[task(shared = [send], priority = 1, capacity = 50)]
+        fn send_message(mut ctx: send_message::Context, message: PanelToDeskMessage) {
+            ctx.shared.send.lock(|send| {
+                let (tx_buf, tx) = match send.take().unwrap() {
+                    TxTransfer::Idle(buf, tx) => (buf, tx),
+                    TxTransfer::Running(transfer) => transfer.wait(),
+                };
+
+                tx_buf.copy_from_slice(&fill_tx_buffer_with_message(message));
+                (*send).replace(TxTransfer::Running(tx.write(tx_buf)));
+            });
+        }
+
+        fn fill_tx_buffer_with_message(message: PanelToDeskMessage) -> [u8; TX_BUF_SIZE] {
+            let mut buf = [0; TX_BUF_SIZE];
+            for i in 0..(TX_BUF_SIZE / DATA_FRAME_SIZE) {
                 let start = i * DATA_FRAME_SIZE;
                 let end = (i + 1) * DATA_FRAME_SIZE - 1;
                 buf[start..end + 1].copy_from_slice(&message.as_frame());
@@ -276,16 +424,18 @@ mod app {
         }
 
         // Triggers on TX transfer completed
-        #[task(binds = DMA1_CHANNEL2, shared = [send], priority = 1)]
-        fn on_tx(ctx: on_tx::Context) {
+        #[task(binds = DMA1_CHANNEL2, shared = [send], priority = 2)]
+        fn on_tx(mut ctx: on_tx::Context) {
             // hprintln!("s").unwrap();
-            let send = ctx.shared.send;
-            let (tx_buf, tx) = match send.take().unwrap() {
-                TxTransfer::Idle(buf, tx) => (buf, tx),
-                TxTransfer::Running(transfer) => transfer.wait(),
-            };
-            // defmt::info!("Sent {:?}", tx_buf);
-            send.replace(TxTransfer::Idle(tx_buf, tx));
+
+            ctx.shared.send.lock(|send| {
+                let (tx_buf, tx) = match send.take().unwrap() {
+                    TxTransfer::Idle(buf, tx) => (buf, tx),
+                    TxTransfer::Running(transfer) => transfer.wait(),
+                };
+                // defmt::info!("Sent {:?}", tx_buf);
+                send.replace(TxTransfer::Idle(tx_buf, tx));
+            });
         }
 
         // Triggers on ADC read completed
@@ -306,11 +456,11 @@ mod app {
             let height = normalize_input_height(new_position);
             *ctx.local.current_adc_pos = new_position;
 
-            ctx.shared
-                .disp
-                .update_buffer_with_float(Index::One, height, 1, 10)
-                .unwrap();
-            ctx.shared.disp.write_display_buffer().unwrap();
+            // ctx.shared
+            //     .disp
+            //     .update_buffer_with_float(Index::One, height, 1, 10)
+            //     .unwrap();
+            // ctx.shared.disp.write_display_buffer().unwrap();
 
             ctx.local.adc_recv.replace(rx.read(rx_buf));
         }
