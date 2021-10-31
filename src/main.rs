@@ -37,14 +37,18 @@ mod app {
 
         use crate::protocol::*;
 
+        const TEMP_TARGET_HEIGHT: f32 = 99.5;
+
         // Typically can go as low as 64 bytes as long as there are no delays (e.g. hprintln! calls)
         // Simple hprintln! calls require 512 or so
-        const RX_BUF_SIZE: usize = 64;
+        const RX_BUF_SIZE: usize = 32;
+        // const RX_BUF_SIZE: usize = 64;
         // const RX_BUF_SIZE: usize = 256;
         // const RX_BUF_SIZE: usize = 1024;
 
         // Should be a multiple of DATA_FRAME_SIZE to ensure Tx is always a whole number of frames
-        const TX_BUF_SIZE: usize = DATA_FRAME_SIZE * 8;
+        const TX_BUF_SIZE: usize = DATA_FRAME_SIZE * 5;
+        // const TX_BUF_SIZE: usize = DATA_FRAME_SIZE * 8;
         // const TX_BUF_SIZE: usize = DATA_FRAME_SIZE * 35;
         // const TX_BUF_SIZE: usize = 256;
 
@@ -72,20 +76,17 @@ mod app {
         // Set to around 4 when using hprintln statements and larger tx/rx buffers
         const TX_REPEAT_TIMES: u16 = 1;
 
-        // TODO: move to protocol module
-        // Set to a lower number when larger buffers are being used
-        const NO_KEY_ITERATION_COUNT: u16 = 5;
-        // const NO_KEY_ITERATION_COUNT: u16 = 4;
-        // const NO_KEY_ITERATION_COUNT: u16 = 1;
+        // Lower than 3 doesn't work for typical buffer sizes
+        const NO_KEY_SPAWN_COUNT: u16 = 3;
 
-        const NO_KEY_SPAWN_COUNT: u16 = 20;
+        const MAX_STABLE_ITERATION_COUNT: u16 = 2;
 
         pub enum TxTransfer {
             Running(Transfer<R, &'static mut [u8; TX_BUF_SIZE], TxDma<Tx<USART3>, C2>>),
             Idle(&'static mut [u8; TX_BUF_SIZE], TxDma<Tx<USART3>, C2>),
         }
 
-        #[derive(Clone, Copy)]
+        #[derive(Clone, Copy, PartialEq)]
         pub enum Direction {
             Up,
             Down,
@@ -116,6 +117,8 @@ mod app {
         struct Local {
             no_key_send_count: u16,
             current_direction: Option<Direction>,
+            stable_iteration_count: u16,
+            previous_iteration_height: f32,
 
             recv: Option<Transfer<W, &'static mut [u8; RX_BUF_SIZE], RxDma<Rx<USART3>, C3>>>,
 
@@ -214,12 +217,11 @@ mod app {
                 send_message::spawn(PanelToDeskMessage::NoKey).unwrap();
             }
 
-            let temp_target_height = 71.5;
             (
                 Shared {
                     send: Some(TxTransfer::Idle(ctx.local.tx_buf, tx)),
                     disp: ht16k33,
-                    target_height: Some(temp_target_height),
+                    target_height: Some(TEMP_TARGET_HEIGHT),
                     current_height: 0.0,
                 },
                 Local {
@@ -228,6 +230,8 @@ mod app {
                     current_adc_pos: 0,
                     no_key_send_count: 0,
                     current_direction: None,
+                    stable_iteration_count: 0,
+                    previous_iteration_height: 0.0,
                 },
                 init::Monotonics(),
             )
@@ -286,58 +290,83 @@ mod app {
             return [0; DATA_FRAME_SIZE];
         }
 
-        #[task(local = [no_key_send_count,current_direction], shared = [current_height, target_height], priority = 1, capacity = 1)]
+        #[task(local = [current_direction, no_key_send_count,previous_iteration_height, stable_iteration_count], shared = [current_height, target_height], priority = 1, capacity = 1)]
         fn compare_height(mut ctx: compare_height::Context) {
             let mut current_direction = *ctx.local.current_direction;
             let mut no_key_send_count = *ctx.local.no_key_send_count;
+            let mut stable_iteration_count = *ctx.local.stable_iteration_count;
+            let mut previous_iteration_height = *ctx.local.previous_iteration_height;
             let mut message = None;
 
             (ctx.shared.current_height, ctx.shared.target_height).lock(
-                |current_height, ctx_target_height| match current_direction {
-                    Some(Direction::Reversing) => {
-                        // if no_key_send_count < NO_KEY_ITERATION_COUNT {
-                        //     message = Some(PanelToDeskMessage::NoKey);
-                        // } else {
-                        current_direction = None;
-                        // }
+                |current_height, ctx_target_height| {
+                    if *current_height == previous_iteration_height {
+                        stable_iteration_count += 1;
+                    } else {
+                        stable_iteration_count = 0;
                     }
-                    _ => match *ctx_target_height {
-                        Some(target_height) => {
-                            if *current_height < target_height {
-                                match current_direction {
-                                    Some(Direction::Down) => {
-                                        current_direction = Some(Direction::Reversing);
-                                        message = Some(PanelToDeskMessage::NoKey);
-                                    }
-                                    _ => {
-                                        current_direction = Some(Direction::Up);
-                                        message = Some(PanelToDeskMessage::Up);
-                                    }
-                                }
-                            } else if *current_height > target_height {
-                                match current_direction {
-                                    Some(Direction::Up) => {
-                                        current_direction = Some(Direction::Reversing);
-                                        message = Some(PanelToDeskMessage::NoKey);
-                                    }
-                                    _ => {
-                                        current_direction = Some(Direction::Down);
-                                        message = Some(PanelToDeskMessage::Down);
-                                    }
-                                }
-                            } else {
-                                current_direction = None;
-                                if no_key_send_count < NO_KEY_ITERATION_COUNT {
+                    previous_iteration_height = *current_height;
+
+                    match current_direction {
+                        Some(Direction::Reversing) => {
+                            // if no_key_send_count < NO_KEY_ITERATION_COUNT {
+                            //     message = Some(PanelToDeskMessage::NoKey);
+                            // } else {
+                            current_direction = None;
+                            // }
+                        }
+                        _ => match *ctx_target_height {
+                            Some(target_height) => {
+                                if abs_diff_f32(*current_height, target_height) < 2.0
+                                    && stable_iteration_count < MAX_STABLE_ITERATION_COUNT
+                                {
                                     message = Some(PanelToDeskMessage::NoKey);
+                                    current_direction = None;
                                 } else {
-                                    *ctx_target_height = None;
+                                    if *current_height < target_height {
+                                        match current_direction {
+                                            Some(Direction::Down) => {
+                                                current_direction = Some(Direction::Reversing);
+                                                message = Some(PanelToDeskMessage::NoKey);
+                                            }
+                                            _ => {
+                                                current_direction = Some(Direction::Up);
+                                                message = Some(PanelToDeskMessage::Up);
+                                            }
+                                        }
+                                    } else if *current_height > target_height {
+                                        match current_direction {
+                                            Some(Direction::Up) => {
+                                                current_direction = Some(Direction::Reversing);
+                                                message = Some(PanelToDeskMessage::NoKey);
+                                            }
+                                            _ => {
+                                                current_direction = Some(Direction::Down);
+                                                message = Some(PanelToDeskMessage::Down);
+                                            }
+                                        }
+                                    } else {
+                                        current_direction = None;
+
+                                        if stable_iteration_count < MAX_STABLE_ITERATION_COUNT {
+                                            message = Some(PanelToDeskMessage::NoKey);
+                                        } else {
+                                            *ctx_target_height = None;
+                                        }
+
+                                        // if no_key_send_count < NO_KEY_ITERATION_COUNT {
+                                        //     message = Some(PanelToDeskMessage::NoKey);
+                                        // } else {
+                                        //     *ctx_target_height = None;
+                                        // }
+                                    }
                                 }
                             }
-                        }
-                        None => {
-                            panic!("at target height - rest of code not implemented");
-                        }
-                    },
+                            None => {
+                                panic!("at target height - rest of code not implemented");
+                            }
+                        },
+                    }
                 },
             );
 
@@ -385,6 +414,8 @@ mod app {
 
             *ctx.local.no_key_send_count = no_key_send_count;
             *ctx.local.current_direction = current_direction;
+            *ctx.local.previous_iteration_height = previous_iteration_height;
+            *ctx.local.stable_iteration_count = stable_iteration_count;
 
             match message {
                 Some(PanelToDeskMessage::NoKey) => {
@@ -466,7 +497,7 @@ mod app {
         }
 
         fn threshold_smooth_adc(val: u16, prev_val: u16) -> u16 {
-            let h = if abs_diff(val, prev_val) > ADC_SMOOTH_THRESHOLD {
+            let h = if abs_diff_u16(val, prev_val) > ADC_SMOOTH_THRESHOLD {
                 val
             } else {
                 prev_val
@@ -475,7 +506,15 @@ mod app {
             return h;
         }
 
-        fn abs_diff(a: u16, b: u16) -> u16 {
+        fn abs_diff_u16(a: u16, b: u16) -> u16 {
+            if a > b {
+                return a - b;
+            } else {
+                return b - a;
+            }
+        }
+
+        fn abs_diff_f32(a: f32, b: f32) -> f32 {
             if a > b {
                 return a - b;
             } else {
