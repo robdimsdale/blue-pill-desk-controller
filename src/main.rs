@@ -37,20 +37,33 @@ mod app {
 
         use crate::protocol::*;
 
-        const TEMP_TARGET_HEIGHT: f32 = 99.5;
+        const TEMP_TARGET_HEIGHT: f32 = 65.5;
 
-        // Typically can go as low as 64 bytes as long as there are no delays (e.g. hprintln! calls)
-        // Simple hprintln! calls require 512 or so
-        const RX_BUF_SIZE: usize = 32;
+        // Typically can go as low as 16 bytes as long as there are no delays (e.g. hprintln! calls)
+        // Simple hprintln! calls require 512 or more
+        // Going too small increases the risk of having a corrupted + incomplete frame.
+        const RX_BUF_SIZE: usize = 16;
+        // const RX_BUF_SIZE: usize = 32;
         // const RX_BUF_SIZE: usize = 64;
         // const RX_BUF_SIZE: usize = 256;
         // const RX_BUF_SIZE: usize = 1024;
 
         // Should be a multiple of DATA_FRAME_SIZE to ensure Tx is always a whole number of frames
-        const TX_BUF_SIZE: usize = DATA_FRAME_SIZE * 5;
+        // Should always be smaller than RX_BUF_SIZE to avoid trying to send more than fits
+        // in the RX-interrupt-driven loop
+        const TX_BUF_SIZE: usize = DATA_FRAME_SIZE * 2;
+        // const TX_BUF_SIZE: usize = DATA_FRAME_SIZE * 5;
         // const TX_BUF_SIZE: usize = DATA_FRAME_SIZE * 8;
         // const TX_BUF_SIZE: usize = DATA_FRAME_SIZE * 35;
         // const TX_BUF_SIZE: usize = 256;
+
+        // This is inversely proportional to TX_BUF_SIZE, as there is a minimum amount of time the
+        // "no key" signal must be sent for.
+        // const NO_KEY_SPAWN_COUNT: u16 = 3;
+        const NO_KEY_SPAWN_COUNT: u16 = 6;
+
+        // Must be > 1
+        const MAX_STABLE_ITERATION_COUNT: u16 = 3;
 
         // Should be large enough to allow average (de-noising) and reduce interrupt frequency,
         // while also small enough not to negatively impact response.
@@ -72,14 +85,6 @@ mod app {
         // We empirically observe a typical max value is about 4090.
         // We also want to set this lower to account for de-noising (averaging)
         const ADC_MAX_VALUE: u16 = 4070;
-
-        // Set to around 4 when using hprintln statements and larger tx/rx buffers
-        const TX_REPEAT_TIMES: u16 = 1;
-
-        // Lower than 3 doesn't work for typical buffer sizes
-        const NO_KEY_SPAWN_COUNT: u16 = 3;
-
-        const MAX_STABLE_ITERATION_COUNT: u16 = 2;
 
         pub enum TxTransfer {
             Running(Transfer<R, &'static mut [u8; TX_BUF_SIZE], TxDma<Tx<USART3>, C2>>),
@@ -317,7 +322,7 @@ mod app {
                         }
                         _ => match *ctx_target_height {
                             Some(target_height) => {
-                                if abs_diff_f32(*current_height, target_height) < 2.0
+                                if abs_diff_f32(*current_height, target_height) < 1.5
                                     && stable_iteration_count < MAX_STABLE_ITERATION_COUNT
                                 {
                                     message = Some(PanelToDeskMessage::NoKey);
