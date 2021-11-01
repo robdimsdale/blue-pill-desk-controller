@@ -10,6 +10,10 @@ use panic_semihosting as _; // panic handler
 // from: https://github.com/kalkyl/f103-rtic/blob/main/src/bin/serial.rs
 #[rtic::app(device = stm32f1xx_hal::pac, peripherals = true, dispatchers = [EXTI2, EXTI3, EXTI4])]
 mod app {
+    use cortex_m::{
+        asm,
+        peripheral::{syst::SystClkSource, SYST},
+    };
     use stm32f1xx_hal::{
         adc,
         adc::{AdcPayload, Continuous, SampleTime},
@@ -25,9 +29,8 @@ mod app {
     };
 
     use adafruit_7segment::{Index, SevenSegment};
-    use cortex_m::asm;
-    use cortex_m::peripheral::{syst::SystClkSource, SYST};
     use ht16k33::{Dimming, Display, HT16K33};
+    use nb::block;
     use rtic::rtic_monotonic::{
         embedded_time::{clock::Error, fraction::Fraction},
         Clock, Instant, Monotonic,
@@ -200,7 +203,7 @@ mod app {
 
         let mut ht16k33 = HT16K33::new(i2c, DISP_I2C_ADDR);
 
-        ht16k33.initialize().expect("Failed to initialize ht16k33");
+        block!(ht16k33.initialize()).expect("Failed to initialize ht16k33");
 
         ht16k33
             .set_display(Display::ON)
