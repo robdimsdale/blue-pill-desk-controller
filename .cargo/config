@@ -7,12 +7,7 @@ runner = "arm-none-eabi-gdb -q -x openocd.gdb"
 # runner = "gdb -q -x openocd.gdb"
 
 rustflags = [
-    #"-C", "linker=flip-link",
     "-C", "link-arg=-Tlink.x",
-    # This is needed if your flash or ram addresses are not aligned to 0x10000 in memory.x
-    # See https://github.com/rust-embedded/cortex-m-quickstart/pull/95
-    # unclear if needed - RDZ
-    #"-C", "link-arg=--nmagic",
 ]
 
 [build]
