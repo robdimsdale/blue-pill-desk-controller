@@ -7,16 +7,13 @@ mod protocol;
 
 use panic_semihosting as _; // panic handler
 
-// TODO: add in GPIO buttons
-//     let pin_switch = gpiob.pb1.into_pull_up_input(&mut gpiob.crl);
-
 // from: https://github.com/kalkyl/f103-rtic/blob/main/src/bin/serial.rs
 mod app {
-    #[rtic::app(device = stm32f1xx_hal::pac, peripherals = true, dispatchers = [EXTI2,EXTI3])]
+    #[rtic::app(device = stm32f1xx_hal::pac, peripherals = true, dispatchers = [EXTI2, EXTI3, EXTI4])]
     mod app {
         use stm32f1xx_hal::{
             adc,
-            adc::Continuous,
+            adc::{AdcPayload, Continuous, SampleTime},
             dma::{
                 dma1::{C1, C2, C3},
                 Event, RxDma, Transfer, TxDma, R, W,
@@ -30,15 +27,17 @@ mod app {
 
         use adafruit_7segment::{Index, SevenSegment};
         use cortex_m::asm;
+        use cortex_m::peripheral::{syst::SystClkSource, SYST};
         use ht16k33::{Dimming, Display, HT16K33};
+        use rtic::rtic_monotonic::{
+            embedded_time::{clock::Error, fraction::Fraction},
+            Clock, Instant, Monotonic,
+        };
+        use rtic::time::duration::*;
 
         use cortex_m_semihosting::hprintln;
-        use stm32f1xx_hal::adc::{AdcPayload, SampleTime};
-        use stm32f1xx_hal::gpio::gpiob::PB11;
 
         use crate::protocol::*;
-
-        const TEMP_TARGET_HEIGHT: f32 = 65.5;
 
         // Typically can go as low as 16 bytes as long as there are no delays (e.g. hprintln! calls)
         // Simple hprintln! calls require 512 or more
@@ -103,6 +102,9 @@ mod app {
             Reversing,
         }
 
+        #[monotonic(binds = SysTick, default = true)]
+        type MyMono = Systick<1000>; // 1000 Hz / 1 ms granularity
+
         #[shared]
         struct Shared {
             // TODO: ensure that this doesn't actually result in a deadlock due to the use of
@@ -121,12 +123,13 @@ mod app {
 
             target_height: Option<f32>,
             current_height: f32,
+            input_height: f32,
+            current_direction: Option<Direction>,
         }
 
         #[local]
         struct Local {
             no_key_send_count: u16,
-            current_direction: Option<Direction>,
             stable_iteration_count: u16,
             previous_iteration_height: f32,
 
@@ -156,6 +159,8 @@ mod app {
                 .sysclk(72.mhz())
                 .pclk1(36.mhz())
                 .freeze(&mut flash.acr);
+
+            let mono = Systick::new(ctx.core.SYST, 72_000_000);
 
             let mut afio = ctx.device.AFIO.constrain(&mut rcc.apb2);
             let mut gpioa = ctx.device.GPIOA.split(&mut rcc.apb2);
@@ -239,20 +244,21 @@ mod app {
                 Shared {
                     send: Some(TxTransfer::Idle(ctx.local.tx_buf, tx)),
                     disp: ht16k33,
-                    target_height: Some(TEMP_TARGET_HEIGHT),
+                    target_height: None,
                     current_height: 0.0,
+                    input_height: 0.0,
+                    current_direction: None,
                 },
                 Local {
                     recv: Some(rx.read(ctx.local.rx_buf)),
                     adc_recv: Some(adc_dma.read(ctx.local.adc_buf)),
                     current_adc_pos: 0,
                     no_key_send_count: 0,
-                    current_direction: None,
                     stable_iteration_count: 0,
                     previous_iteration_height: 0.0,
                     button: button,
                 },
-                init::Monotonics(),
+                init::Monotonics(mono),
             )
         }
 
@@ -264,7 +270,7 @@ mod app {
         }
 
         // Triggers on RX transfer completed
-        #[task(binds = DMA1_CHANNEL3, local = [recv], priority = 3)]
+        #[task(binds = DMA1_CHANNEL3, local = [recv], priority = 4)]
         fn on_rx(ctx: on_rx::Context) {
             let (rx_buf, rx) = ctx.local.recv.take().unwrap().wait();
             read_height::spawn(*rx_buf).unwrap();
@@ -309,16 +315,19 @@ mod app {
             return [0; DATA_FRAME_SIZE];
         }
 
-        #[task(local = [current_direction, no_key_send_count,previous_iteration_height, stable_iteration_count], shared = [current_height, target_height], priority = 1, capacity = 1)]
+        #[task(local = [no_key_send_count, previous_iteration_height, stable_iteration_count], shared = [current_direction, current_height, target_height], priority = 1, capacity = 1)]
         fn compare_height(mut ctx: compare_height::Context) {
-            let mut current_direction = *ctx.local.current_direction;
             let mut no_key_send_count = *ctx.local.no_key_send_count;
             let mut stable_iteration_count = *ctx.local.stable_iteration_count;
             let mut previous_iteration_height = *ctx.local.previous_iteration_height;
             let mut message = None;
 
-            (ctx.shared.current_height, ctx.shared.target_height).lock(
-                |current_height, ctx_target_height| {
+            (
+                ctx.shared.current_direction,
+                ctx.shared.current_height,
+                ctx.shared.target_height,
+            )
+                .lock(|current_direction, current_height, ctx_target_height| {
                     if *current_height == previous_iteration_height {
                         stable_iteration_count += 1;
                     } else {
@@ -331,7 +340,7 @@ mod app {
                             // if no_key_send_count < NO_KEY_ITERATION_COUNT {
                             //     message = Some(PanelToDeskMessage::NoKey);
                             // } else {
-                            current_direction = None;
+                            *current_direction = None;
                             // }
                         }
                         _ => match *ctx_target_height {
@@ -340,32 +349,32 @@ mod app {
                                     && stable_iteration_count < MAX_STABLE_ITERATION_COUNT
                                 {
                                     message = Some(PanelToDeskMessage::NoKey);
-                                    current_direction = None;
+                                    *current_direction = None;
                                 } else {
                                     if *current_height < target_height {
                                         match current_direction {
                                             Some(Direction::Down) => {
-                                                current_direction = Some(Direction::Reversing);
+                                                *current_direction = Some(Direction::Reversing);
                                                 message = Some(PanelToDeskMessage::NoKey);
                                             }
                                             _ => {
-                                                current_direction = Some(Direction::Up);
+                                                *current_direction = Some(Direction::Up);
                                                 message = Some(PanelToDeskMessage::Up);
                                             }
                                         }
                                     } else if *current_height > target_height {
                                         match current_direction {
                                             Some(Direction::Up) => {
-                                                current_direction = Some(Direction::Reversing);
+                                                *current_direction = Some(Direction::Reversing);
                                                 message = Some(PanelToDeskMessage::NoKey);
                                             }
                                             _ => {
-                                                current_direction = Some(Direction::Down);
+                                                *current_direction = Some(Direction::Down);
                                                 message = Some(PanelToDeskMessage::Down);
                                             }
                                         }
                                     } else {
-                                        current_direction = None;
+                                        *current_direction = None;
 
                                         if stable_iteration_count < MAX_STABLE_ITERATION_COUNT {
                                             message = Some(PanelToDeskMessage::NoKey);
@@ -386,8 +395,7 @@ mod app {
                             }
                         },
                     }
-                },
-            );
+                });
 
             // // TODO: remove references to this once we're happy with the multiple spawn behavior
             // no_key_send_count = NO_KEY_SEND_COUNT;
@@ -432,7 +440,7 @@ mod app {
             // }
 
             *ctx.local.no_key_send_count = no_key_send_count;
-            *ctx.local.current_direction = current_direction;
+            // *ctx.local.current_direction = current_direction;
             *ctx.local.previous_iteration_height = previous_iteration_height;
             *ctx.local.stable_iteration_count = stable_iteration_count;
 
@@ -489,25 +497,54 @@ mod app {
         }
 
         // Triggers on button pressed
-        #[task(binds = EXTI1, local = [button], shared = [disp], priority = 1)]
-        fn on_btn_press(ctx: on_btn_press::Context) {
+        #[task(binds = EXTI1, local = [button], shared = [input_height, target_height], priority = 1)]
+        fn on_btn_press(mut ctx: on_btn_press::Context) {
             let button = ctx.local.button;
             if button.check_interrupt() {
                 button.clear_interrupt_pending_bit();
-                hprintln!("b").unwrap();
+                // hprintln!("b").unwrap();
+                (ctx.shared.input_height, ctx.shared.target_height).lock(
+                    |input_height, target_height| {
+                        // TODO: replace with more useful code when we have multiple buttons
+                        // match target_height {
+                        //     None => {
+                        //         *target_height = Some(*input_height);
+                        //     }
+                        //     Some(_) => {
+                        //         *target_height = None;
+                        //         stop_moving::spawn().unwrap();
+                        //     }
+                        // }
+
+                        *target_height = Some(*input_height);
+                        stop_moving::spawn_after(3.seconds()).unwrap();
+                    },
+                );
             }
         }
 
+        #[task(shared = [current_direction, target_height], priority = 3, capacity = 5)]
+        fn stop_moving(mut ctx: stop_moving::Context) {
+            (ctx.shared.current_direction, ctx.shared.target_height).lock(
+                |current_direction, target_height| {
+                    *current_direction = None;
+                    *target_height = None;
+                },
+            );
+
+            send_message::spawn(PanelToDeskMessage::NoKey).unwrap();
+        }
+
         // Triggers on ADC read completed
-        #[task(binds = DMA1_CHANNEL1, local = [adc_recv,current_adc_pos], shared = [disp], priority = 1)]
-        fn on_adc_read(ctx: on_adc_read::Context) {
+        #[task(binds = DMA1_CHANNEL1, local = [adc_recv, current_adc_pos], shared = [input_height], priority = 1)]
+        fn on_adc_read(mut ctx: on_adc_read::Context) {
             let (rx_buf, rx) = ctx.local.adc_recv.take().unwrap().wait();
 
             // Cast to u32 to enable summation as u32 and avoid overrun which would often occur
             // if we tried to sum as u16.
             // The max value in the buffer is 2^12 - 1, and the max u16 value is 2^16 - 1,
-            // and the buffer size is 35.
-            // 35 * (2^12 - 1) > 2^16-1, hence overrun
+            // so if the buffer size is > 2^4 then we will see overrun for large values:
+            // 2^4 * (2^12-1) is close to 2^16
             let avg =
                 (&rx_buf.iter().map(|&x| x as u32).sum::<u32>() / (rx_buf.len() as u32)) as u16;
 
@@ -515,6 +552,10 @@ mod app {
 
             let height = normalize_input_height(new_position);
             *ctx.local.current_adc_pos = new_position;
+
+            ctx.shared.input_height.lock(|input_height| {
+                *input_height = height;
+            });
 
             // ctx.shared
             //     .disp
@@ -569,6 +610,68 @@ mod app {
             let rounded_multiple = (val / round_to) as u16;
             let x = rounded_multiple as f32 * round_to;
             return x;
+        }
+
+        /// Systick implementing `embedded_time::Clock` and `rtic_monotonic::Monotonic` which runs at a
+        /// settable rate using the `TIMER_HZ` parameter.
+        ///
+        /// from: https://github.com/rtic-rs/systick-monotonic/blob/master/src/lib.rs
+        pub struct Systick<const TIMER_HZ: u32> {
+            systick: SYST,
+            cnt: u32,
+            reload: u32,
+        }
+
+        impl<const TIMER_HZ: u32> Systick<TIMER_HZ> {
+            /// Provide a new `Monotonic` based on SysTick.
+            ///
+            /// Note that the `sysclk` parameter should come from e.g. the HAL's clock generation function
+            /// so the real speed and the declared speed can be compared.
+            pub fn new(mut systick: SYST, sysclk: u32) -> Self {
+                systick.disable_counter();
+
+                Systick {
+                    systick,
+                    cnt: 0,
+                    reload: (sysclk + TIMER_HZ / 2) / TIMER_HZ - 1,
+                }
+            }
+        }
+
+        impl<const TIMER_HZ: u32> Clock for Systick<TIMER_HZ> {
+            type T = u32;
+
+            const SCALING_FACTOR: Fraction = Fraction::new(1, TIMER_HZ);
+
+            #[inline(always)]
+            fn try_now(&self) -> Result<Instant<Self>, Error> {
+                // The instant is always valid
+                Ok(Instant::new(self.cnt))
+            }
+        }
+
+        impl<const TIMER_HZ: u32> Monotonic for Systick<TIMER_HZ> {
+            const DISABLE_INTERRUPT_ON_EMPTY_QUEUE: bool = false;
+
+            unsafe fn reset(&mut self) {
+                self.systick.set_clock_source(SystClkSource::Core);
+                self.systick.set_reload(self.reload);
+                self.systick.clear_current();
+                self.systick.enable_counter();
+            }
+
+            fn set_compare(&mut self, _val: &Instant<Self>) {
+                // No need to do something here, we get interrupts every tick anyways.
+            }
+
+            fn clear_compare_flag(&mut self) {
+                // NOOP with SysTick interrupt
+            }
+
+            fn on_interrupt(&mut self) {
+                // Increase the counter every overflow.
+                self.cnt += 1;
+            }
         }
     }
 }
