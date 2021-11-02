@@ -88,6 +88,7 @@ mod app {
     const ADC_MAX_VALUE: u16 = 4070;
 
     const DISPLAY_TARGET_HEIGHT_RESET_INTERVAL_SECONDS: u32 = 3;
+    const DISPLAY_OFF_INTERVAL_SECONDS: u32 = 5;
 
     pub enum TxTransfer {
         Running(Transfer<R, &'static mut [u8; TX_BUF_SIZE], TxDma<Tx<USART3>, C2>>),
@@ -151,6 +152,8 @@ mod app {
                 ),
             >,
         >,
+        current_disp_value: f32,
+        disp_last_changed: Instant<MyMono>,
 
         current_adc_pos: u16,
 
@@ -224,13 +227,9 @@ mod app {
 
         block!(ht16k33.initialize()).expect("Failed to initialize ht16k33");
 
-        ht16k33
-            .set_display(Display::ON)
-            .expect("Could not turn on the display!");
+        ht16k33.set_display(Display::ON).unwrap();
 
-        ht16k33
-            .set_dimming(Dimming::BRIGHTNESS_MAX)
-            .expect("Could not set dimming!");
+        ht16k33.set_dimming(Dimming::BRIGHTNESS_MAX).unwrap();
 
         let tx = gpiob.pb10.into_alternate_push_pull(&mut gpiob.crh);
         let rx = gpiob.pb11;
@@ -265,6 +264,8 @@ mod app {
             },
             Local {
                 disp: ht16k33,
+                current_disp_value: 0.0,
+                disp_last_changed: Instant::<MyMono>::new(0),
                 recv: Some(rx.read(ctx.local.rx_buf)),
                 adc_recv: Some(adc_dma.read(ctx.local.adc_buf)),
                 current_adc_pos: 0,
@@ -512,9 +513,12 @@ mod app {
         });
     }
 
-    #[task(local = [disp], shared = [current_height, disp_mode, input_height], priority = 1)]
+    #[task(local = [disp, current_disp_value, disp_last_changed], shared = [current_height, disp_mode, input_height], priority = 1)]
     fn update_display(ctx: update_display::Context) {
         let disp = ctx.local.disp;
+        let current_disp_value = ctx.local.current_disp_value;
+        let disp_last_changed = ctx.local.disp_last_changed;
+
         (
             ctx.shared.current_height,
             ctx.shared.input_height,
@@ -525,6 +529,18 @@ mod app {
                     DisplayMode::CurrentHeight => *current_height,
                     DisplayMode::InputHeight => *input_height,
                 };
+
+                if h != *current_disp_value {
+                    *disp_last_changed = monotonics::now();
+                }
+                *current_disp_value = h;
+
+                if monotonics::now() > (*disp_last_changed + DISPLAY_OFF_INTERVAL_SECONDS.seconds())
+                {
+                    disp.set_display(Display::OFF).unwrap();
+                } else {
+                    disp.set_display(Display::ON).unwrap();
+                }
 
                 disp.update_buffer_with_float(Index::One, h, 1, 10).unwrap();
                 disp.write_display_buffer().unwrap();
