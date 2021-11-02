@@ -106,11 +106,10 @@ dependencies = [
  "cortex-m 0.6.7",
  "cortex-m-rt",
  "cortex-m-rtic",
- "cortex-m-semihosting",
  "embedded-hal",
  "ht16k33",
  "nb 1.0.0",
- "panic-semihosting",
+ "panic-reset",
  "stm32f1xx-hal",
 ]
 
@@ -207,15 +206,6 @@ dependencies = [
  "quote",
  "rtic-syntax",
  "syn",
-]
-
-[[package]]
-name = "cortex-m-semihosting"
-version = "0.3.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bffa6c1454368a6aa4811ae60964c38e6996d397ff8095a8b9211b1c1f749bc"
-dependencies = [
- "cortex-m 0.7.3",
 ]
 
 [[package]]
@@ -433,13 +423,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "panic-semihosting"
-version = "0.5.6"
+name = "panic-reset"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3d55dedd501dfd02514646e0af4d7016ce36bc12ae177ef52056989966a1eec"
+checksum = "acee8535a38487c5c70d61ee87284710452cb3b265304463f20a0c5327a4a8a5"
 dependencies = [
- "cortex-m 0.7.3",
- "cortex-m-semihosting",
+ "cortex-m 0.6.7",
 ]
 
 [[package]]

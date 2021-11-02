@@ -19,6 +19,10 @@ debug = true
 # optimize for size
 opt-level = "z"
 
-[profile.dev.package."*"] # +
+[profile.dev]
+# optimize for size
+opt-level = "z"
+
+[profile.dev.package."*"]
 # optimize for size
 opt-level = "z" # +

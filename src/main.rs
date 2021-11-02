@@ -4,8 +4,8 @@
 #![no_std]
 
 mod protocol;
-
-use panic_semihosting as _; // panic handler
+// use panic_semihosting as _;
+use panic_reset as _;
 
 // from: https://github.com/kalkyl/f103-rtic/blob/main/src/bin/serial.rs
 #[rtic::app(device = stm32f1xx_hal::pac, peripherals = true, dispatchers = [EXTI2, EXTI3, EXTI4])]
@@ -41,7 +41,7 @@ mod app {
     };
     use rtic::time::duration::*;
 
-    use cortex_m_semihosting::hprintln;
+    // use cortex_m_semihosting::hprintln;
 
     use crate::protocol::*;
 
@@ -87,6 +87,8 @@ mod app {
     // and to ensure we reliably get to the max even if the input is moving very slowly
     const ADC_MAX_VALUE: u16 = 4070;
 
+    const DISPLAY_TARGET_HEIGHT_RESET_INTERVAL_SECONDS: u32 = 3;
+
     pub enum TxTransfer {
         Running(Transfer<R, &'static mut [u8; TX_BUF_SIZE], TxDma<Tx<USART3>, C2>>),
         Idle(&'static mut [u8; TX_BUF_SIZE], TxDma<Tx<USART3>, C2>),
@@ -99,6 +101,11 @@ mod app {
         Reversing,
     }
 
+    pub enum DisplayMode {
+        CurrentHeight,
+        InputHeight,
+    }
+
     #[monotonic(binds = SysTick, default = true)]
     type MyMono = Systick<1000>; // 1000 Hz / 1 ms granularity
 
@@ -107,21 +114,14 @@ mod app {
         // TODO: ensure that this doesn't actually result in a deadlock due to the use of
         // transfer.wait() after getting the lock.
         send: Option<TxTransfer>,
-
-        disp: HT16K33<
-            i2c::BlockingI2c<
-                I2C1,
-                (
-                    gpiob::PB6<Alternate<OpenDrain>>,
-                    gpiob::PB7<Alternate<OpenDrain>>,
-                ),
-            >,
-        >,
+        disp_mode: DisplayMode,
 
         target_height: Option<f32>,
         current_height: f32,
         input_height: f32,
         current_direction: Option<Direction>,
+
+        reset_display_handler: Option<reset_display_mode::SpawnHandle>,
     }
 
     #[local]
@@ -139,6 +139,16 @@ mod app {
                 W,
                 &'static mut [u16; ADC_BUF_SIZE],
                 RxDma<AdcPayload<gpioa::PA0<Analog>, Continuous>, C1>,
+            >,
+        >,
+
+        disp: HT16K33<
+            i2c::BlockingI2c<
+                I2C1,
+                (
+                    gpiob::PB6<Alternate<OpenDrain>>,
+                    gpiob::PB7<Alternate<OpenDrain>>,
+                ),
             >,
         >,
 
@@ -180,7 +190,7 @@ mod app {
         // Setup ADC on pin PA0 (potentiometer input)
         let mut adc1 = adc::Adc::adc1(ctx.device.ADC1, &mut rcc.apb2, clocks);
         adc1.set_sample_time(SampleTime::T_239); // Slow down the ADC as much as possible
-        let mut adc_ch0 = gpioa.pa0.into_analog(&mut gpioa.crl);
+        let adc_ch0 = gpioa.pa0.into_analog(&mut gpioa.crl);
         let adc_dma = adc1.with_dma(adc_ch0, dma_channels.1);
 
         // Set up the I2C bus on pins PB6 and PB7 (display)
@@ -238,6 +248,7 @@ mod app {
         let tx = tx_serial.with_dma(dma_channels.2);
         let rx = rx_serial.with_dma(dma_channels.3);
 
+        update_display::spawn_after(10.milliseconds()).unwrap();
         for _ in 0..NO_KEY_SPAWN_COUNT {
             send_message::spawn(PanelToDeskMessage::NoKey).unwrap();
         }
@@ -245,13 +256,15 @@ mod app {
         (
             Shared {
                 send: Some(TxTransfer::Idle(ctx.local.tx_buf, tx)),
-                disp: ht16k33,
+                disp_mode: DisplayMode::InputHeight,
                 target_height: None,
                 current_height: 0.0,
                 input_height: 0.0,
                 current_direction: None,
+                reset_display_handler: None,
             },
             Local {
+                disp: ht16k33,
                 recv: Some(rx.read(ctx.local.rx_buf)),
                 adc_recv: Some(adc_dma.read(ctx.local.adc_buf)),
                 current_adc_pos: 0,
@@ -280,7 +293,7 @@ mod app {
         ctx.local.recv.replace(rx.read(rx_buf));
     }
 
-    #[task(shared = [disp, current_height], priority = 2, capacity = 2)]
+    #[task(shared = [current_height, disp_mode], priority = 2, capacity = 2)]
     fn read_height(mut ctx: read_height::Context, data: [u8; RX_BUF_SIZE]) {
         let frame = find_first_frame(&data);
         if validate_frame(&frame) {
@@ -290,17 +303,12 @@ mod app {
                         *current_height = h;
                     });
 
-                    ctx.shared.disp.lock(|disp| {
-                        disp.update_buffer_with_float(Index::One, h, 1, 10).unwrap();
-                        disp.write_display_buffer().unwrap();
-                    });
-
                     // Explicitly ignore a failed spawn attempt.
                     // We do not care if we miss an opportunity to potentially send a message
                     // as we will catch it next time we enter this function.
                     let _ = compare_height::spawn();
                 }
-                DeskToPanelMessage::Unknown(a, b, c, d, e) => {
+                DeskToPanelMessage::Unknown(_, _, _, _, _) => {
                     // do nothing for now
                 }
             }
@@ -319,7 +327,7 @@ mod app {
     }
 
     #[task(local = [no_key_send_count, previous_iteration_height, stable_iteration_count], shared = [current_direction, current_height, target_height], priority = 1, capacity = 1)]
-    fn compare_height(mut ctx: compare_height::Context) {
+    fn compare_height(ctx: compare_height::Context) {
         let mut no_key_send_count = *ctx.local.no_key_send_count;
         let mut stable_iteration_count = *ctx.local.stable_iteration_count;
         let mut previous_iteration_height = *ctx.local.previous_iteration_height;
@@ -460,7 +468,7 @@ mod app {
         }
     }
 
-    #[task(local = [onboard_led], shared = [send], priority = 1, capacity = 50)]
+    #[task(local = [onboard_led], shared = [send], priority = 1, capacity = 10)]
     fn send_message(mut ctx: send_message::Context, message: PanelToDeskMessage) {
         let onboard_led = ctx.local.onboard_led;
         ctx.shared.send.lock(|send| {
@@ -504,15 +512,50 @@ mod app {
         });
     }
 
+    #[task(local = [disp], shared = [current_height, disp_mode, input_height], priority = 1)]
+    fn update_display(ctx: update_display::Context) {
+        let disp = ctx.local.disp;
+        (
+            ctx.shared.current_height,
+            ctx.shared.input_height,
+            ctx.shared.disp_mode,
+        )
+            .lock(|current_height, input_height, disp_mode| {
+                let h = match disp_mode {
+                    DisplayMode::CurrentHeight => *current_height,
+                    DisplayMode::InputHeight => *input_height,
+                };
+
+                disp.update_buffer_with_float(Index::One, h, 1, 10).unwrap();
+                disp.write_display_buffer().unwrap();
+            });
+
+        update_display::spawn_after(10.milliseconds()).unwrap();
+    }
+
+    #[task(shared = [disp_mode,reset_display_handler], priority = 1, capacity = 1)]
+    fn reset_display_mode(ctx: reset_display_mode::Context) {
+        (ctx.shared.disp_mode, ctx.shared.reset_display_handler).lock(
+            |disp_mode, reset_display_handler| {
+                *disp_mode = DisplayMode::CurrentHeight;
+                *reset_display_handler = None;
+            },
+        );
+    }
+
     // Triggers on button pressed
-    #[task(binds = EXTI1, local = [button], shared = [input_height, target_height], priority = 1)]
-    fn on_btn_press(mut ctx: on_btn_press::Context) {
+    #[task(binds = EXTI1, local = [button], shared = [disp_mode, input_height, target_height], priority = 1)]
+    fn on_btn_press(ctx: on_btn_press::Context) {
         let button = ctx.local.button;
         if button.check_interrupt() {
             button.clear_interrupt_pending_bit();
             // hprintln!("b").unwrap();
-            (ctx.shared.input_height, ctx.shared.target_height).lock(
-                |input_height, target_height| {
+            (
+                ctx.shared.disp_mode,
+                ctx.shared.input_height,
+                ctx.shared.target_height,
+            )
+                .lock(|disp_mode, input_height, target_height| {
                     // TODO: replace with more useful code when we have multiple buttons
                     // match target_height {
                     //     None => {
@@ -525,14 +568,15 @@ mod app {
                     // }
 
                     *target_height = Some(*input_height);
-                    stop_moving::spawn_after(3.seconds()).unwrap();
-                },
-            );
+                    // stop_moving::spawn_after(3.seconds()).unwrap();
+
+                    *disp_mode = DisplayMode::CurrentHeight;
+                });
         }
     }
 
     #[task(shared = [current_direction, target_height], priority = 3, capacity = 5)]
-    fn stop_moving(mut ctx: stop_moving::Context) {
+    fn stop_moving(ctx: stop_moving::Context) {
         (ctx.shared.current_direction, ctx.shared.target_height).lock(
             |current_direction, target_height| {
                 *current_direction = None;
@@ -544,7 +588,7 @@ mod app {
     }
 
     // Triggers on ADC read completed
-    #[task(binds = DMA1_CHANNEL1, local = [adc_recv, current_adc_pos], shared = [input_height], priority = 1)]
+    #[task(binds = DMA1_CHANNEL1, local = [adc_recv, current_adc_pos], shared = [disp_mode, input_height,reset_display_handler], priority = 1)]
     fn on_adc_read(mut ctx: on_adc_read::Context) {
         let (rx_buf, rx) = ctx.local.adc_recv.take().unwrap().wait();
 
@@ -555,7 +599,7 @@ mod app {
         // 2^4 * (2^12-1) is close to 2^16
         let avg = (&rx_buf.iter().map(|&x| x as u32).sum::<u32>() / (rx_buf.len() as u32)) as u16;
 
-        let new_position = threshold_smooth_adc(avg, *ctx.local.current_adc_pos);
+        let (new_position, above_threshold) = threshold_smooth_adc(avg, *ctx.local.current_adc_pos);
 
         let height = normalize_input_height(new_position);
         *ctx.local.current_adc_pos = new_position;
@@ -564,23 +608,42 @@ mod app {
             *input_height = height;
         });
 
-        // ctx.shared
-        //     .disp
-        //     .update_buffer_with_float(Index::One, height, 1, 10)
-        //     .unwrap();
-        // ctx.shared.disp.write_display_buffer().unwrap();
+        if above_threshold {
+            (ctx.shared.disp_mode, ctx.shared.reset_display_handler).lock(
+                |disp_mode, reset_display_handler| {
+                    *disp_mode = DisplayMode::InputHeight;
+
+                    *reset_display_handler = Some(match *reset_display_handler {
+                        None => reset_display_mode::spawn_after(
+                            DISPLAY_TARGET_HEIGHT_RESET_INTERVAL_SECONDS.seconds(),
+                        )
+                        .unwrap(),
+
+                        // Have to take the original reference as the reschedule_after consumes self
+                        Some(_) => reset_display_handler
+                            .take()
+                            .unwrap()
+                            // This could possibly fail for a valid reason if the other task has started execution and this one preempts it.
+                            // This won't happen as long as the priority of this task is lower than or equal to the priority of the other task.
+                            // And in any case it is an extremely small window as the other task immediately gets a lock on the shared reset_display_handler.
+                            .reschedule_after(
+                                DISPLAY_TARGET_HEIGHT_RESET_INTERVAL_SECONDS.seconds(),
+                            )
+                            .unwrap(),
+                    });
+                },
+            );
+        }
 
         ctx.local.adc_recv.replace(rx.read(rx_buf));
     }
 
-    fn threshold_smooth_adc(val: u16, prev_val: u16) -> u16 {
-        let h = if abs_diff_u16(val, prev_val) > ADC_SMOOTH_THRESHOLD {
-            val
+    fn threshold_smooth_adc(val: u16, prev_val: u16) -> (u16, bool) {
+        if abs_diff_u16(val, prev_val) > ADC_SMOOTH_THRESHOLD {
+            (val, true)
         } else {
-            prev_val
-        };
-
-        return h;
+            (prev_val, false)
+        }
     }
 
     fn abs_diff_u16(a: u16, b: u16) -> u16 {
