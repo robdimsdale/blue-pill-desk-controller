@@ -106,10 +106,12 @@ dependencies = [
  "cortex-m 0.6.7",
  "cortex-m-rt",
  "cortex-m-rtic",
+ "defmt",
+ "defmt-rtt",
  "embedded-hal",
  "ht16k33",
  "nb 1.0.0",
- "panic-reset",
+ "panic-probe",
  "stm32f1xx-hal",
 ]
 
@@ -218,6 +220,44 @@ dependencies = [
  "cfg-if",
  "cortex-m 0.7.3",
  "riscv",
+]
+
+[[package]]
+name = "defmt"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15fe96f5d208164afa70583ff8f062e7697cbbb0b98e5076fbf8ac6da9edff0f"
+dependencies = [
+ "defmt-macros",
+ "semver 1.0.4",
+]
+
+[[package]]
+name = "defmt-macros"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9bd2c3949cb76c25f48c363e61b97f05b317efe3c12fa45d54a6599c3949c85e"
+dependencies = [
+ "defmt-parser",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "defmt-parser"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc621c2b4f5f5635e34021c38af2ccb0c1dae38ba11ebee25258de8bb1cee9fe"
+
+[[package]]
+name = "defmt-rtt"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5dfca43cd6b33d2d9f4db9757101ce1044e9672cd7f412dfcc5c5f772243c3b"
+dependencies = [
+ "cortex-m 0.6.7",
+ "defmt",
 ]
 
 [[package]]
@@ -423,12 +463,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "panic-reset"
-version = "0.1.0"
+name = "panic-probe"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "acee8535a38487c5c70d61ee87284710452cb3b265304463f20a0c5327a4a8a5"
+checksum = "6a0fa226f55c70d0d70ad373802f0d65a775478afec75c0f3eee1de5d39057c9"
 dependencies = [
- "cortex-m 0.6.7",
+ "cortex-m 0.7.3",
+ "defmt",
 ]
 
 [[package]]

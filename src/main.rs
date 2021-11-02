@@ -5,7 +5,10 @@
 
 mod protocol;
 // use panic_semihosting as _;
-use panic_reset as _;
+// use panic_reset as _;
+
+use blue_pill_desk_controller as _;
+use panic_probe as _;
 
 // from: https://github.com/kalkyl/f103-rtic/blob/main/src/bin/serial.rs
 #[rtic::app(device = stm32f1xx_hal::pac, peripherals = true, dispatchers = [EXTI2, EXTI3, EXTI4])]
@@ -182,6 +185,8 @@ mod app {
 
     #[init(local = [rx_buf: [u8; RX_BUF_SIZE] = [0; RX_BUF_SIZE], tx_buf: [u8; TX_BUF_SIZE] = [0; TX_BUF_SIZE], adc_buf: [u16; ADC_BUF_SIZE] = [0; ADC_BUF_SIZE]])]
     fn init(mut ctx: init::Context) -> (Shared, Local, init::Monotonics) {
+        defmt::info!("Hello, world!");
+
         let mut rcc = ctx.device.RCC.constrain();
         let mut flash = ctx.device.FLASH.constrain();
 
