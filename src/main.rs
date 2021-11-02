@@ -41,8 +41,6 @@ mod app {
     };
     use rtic::time::duration::*;
 
-    // use cortex_m_semihosting::hprintln;
-
     use crate::protocol::*;
 
     // Typically can go as low as 16 bytes as long as there are no delays (e.g. hprintln! calls)
@@ -422,36 +420,6 @@ mod app {
             }
         }
 
-        // match message {
-        //     Some(PanelToDeskMessage::Up) => {
-        //         hprintln!("u").unwrap();
-        //     }
-        //     Some(PanelToDeskMessage::Down) => {
-        //         hprintln!("d").unwrap();
-        //     }
-        //     Some(PanelToDeskMessage::NoKey) => {
-        //         hprintln!("k, {}", no_key_send_count).unwrap();
-        //         match current_direction {
-        //             Some(Direction::Reversing) => {
-        //                 hprintln!("dr").unwrap();
-        //             }
-        //             Some(Direction::Up) => {
-        //                 hprintln!("du").unwrap();
-        //             }
-        //             Some(Direction::Down) => {
-        //                 hprintln!("dd").unwrap();
-        //             }
-        //             None => {
-        //                 hprintln!("dn").unwrap();
-        //             }
-        //         }
-        //     }
-        //     None => {
-        //         hprintln!("n").unwrap();
-        //     }
-        //     _ => {}
-        // }
-
         *ctx.local.no_key_send_count = no_key_send_count;
         // *ctx.local.current_direction = current_direction;
         *ctx.local.previous_iteration_height = previous_iteration_height;
@@ -494,7 +462,6 @@ mod app {
             let start = i * DATA_FRAME_SIZE;
             let end = (i + 1) * DATA_FRAME_SIZE - 1;
             buf[start..end + 1].copy_from_slice(&message.as_frame());
-            //hprintln!("buf[{:?}..{:?}]={:?}", start, end, &buf[start..end + 1],).unwrap();
         }
         buf
     }
@@ -502,14 +469,11 @@ mod app {
     // Triggers on TX transfer completed
     #[task(binds = DMA1_CHANNEL2, shared = [send], priority = 2)]
     fn on_tx(mut ctx: on_tx::Context) {
-        // hprintln!("s").unwrap();
-
         ctx.shared.send.lock(|send| {
             let (tx_buf, tx) = match send.take().unwrap() {
                 TxTransfer::Idle(buf, tx) => (buf, tx),
                 TxTransfer::Running(transfer) => transfer.wait(),
             };
-            // defmt::info!("Sent {:?}", tx_buf);
             send.replace(TxTransfer::Idle(tx_buf, tx));
         });
     }
@@ -566,7 +530,6 @@ mod app {
         let button = ctx.local.button;
         if button.check_interrupt() {
             button.clear_interrupt_pending_bit();
-            // hprintln!("b").unwrap();
             (
                 ctx.shared.disp_mode,
                 ctx.shared.input_height,
