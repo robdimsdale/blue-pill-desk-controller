@@ -89,6 +89,7 @@ mod app {
 
     const DISPLAY_TARGET_HEIGHT_RESET_INTERVAL_SECONDS: u32 = 3;
     const DISPLAY_OFF_INTERVAL_SECONDS: u32 = 5;
+    const DISPLAY_UPDATE_INTERVAL_MILLISECONDS: u32 = 10;
 
     pub enum TxTransfer {
         Running(Transfer<R, &'static mut [u8; TX_BUF_SIZE], TxDma<Tx<USART3>, C2>>),
@@ -247,7 +248,7 @@ mod app {
         let tx = tx_serial.with_dma(dma_channels.2);
         let rx = rx_serial.with_dma(dma_channels.3);
 
-        update_display::spawn_after(10.milliseconds()).unwrap();
+        update_display::spawn_after(DISPLAY_UPDATE_INTERVAL_MILLISECONDS.milliseconds()).unwrap();
         for _ in 0..NO_KEY_SPAWN_COUNT {
             send_message::spawn(PanelToDeskMessage::NoKey).unwrap();
         }
