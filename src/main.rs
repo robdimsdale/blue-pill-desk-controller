@@ -21,7 +21,10 @@ mod app {
             dma1::{C1, C2, C3},
             Event, RxDma, Transfer, TxDma, R, W,
         },
-        gpio::{gpioa, gpiob, Alternate, Analog, Edge, ExtiPin, Input, OpenDrain, PullUp},
+        gpio::{
+            gpioa, gpiob, gpioc, Alternate, Analog, Edge, ExtiPin, Input, OpenDrain, Output,
+            PullUp, PushPull,
+        },
         i2c,
         pac::{I2C1, USART3},
         prelude::*,
@@ -29,6 +32,7 @@ mod app {
     };
 
     use adafruit_7segment::{Index, SevenSegment};
+    use embedded_hal::digital::v2::OutputPin;
     use ht16k33::{Dimming, Display, HT16K33};
     use nb::block;
     use rtic::rtic_monotonic::{
@@ -139,6 +143,8 @@ mod app {
         >,
 
         current_adc_pos: u16,
+
+        onboard_led: gpioc::PC13<Output<PushPull>>,
     }
 
     #[init(local = [rx_buf: [u8; RX_BUF_SIZE] = [0; RX_BUF_SIZE], tx_buf: [u8; TX_BUF_SIZE] = [0; TX_BUF_SIZE], adc_buf: [u16; ADC_BUF_SIZE] = [0; ADC_BUF_SIZE]])]
@@ -158,6 +164,9 @@ mod app {
         let mut afio = ctx.device.AFIO.constrain(&mut rcc.apb2);
         let mut gpioa = ctx.device.GPIOA.split(&mut rcc.apb2);
         let mut gpiob = ctx.device.GPIOB.split(&mut rcc.apb2);
+        let mut gpioc = ctx.device.GPIOC.split(&mut rcc.apb2);
+
+        let onboard_led = gpioc.pc13.into_push_pull_output(&mut gpioc.crh);
 
         let mut dma_channels = ctx.device.DMA1.split(&mut rcc.ahb);
         dma_channels.1.listen(Event::TransferComplete);
@@ -250,6 +259,7 @@ mod app {
                 stable_iteration_count: 0,
                 previous_iteration_height: 0.0,
                 button: button,
+                onboard_led: onboard_led,
             },
             init::Monotonics(mono),
         )
@@ -450,9 +460,12 @@ mod app {
         }
     }
 
-    #[task(shared = [send], priority = 1, capacity = 50)]
+    #[task(local = [onboard_led], shared = [send], priority = 1, capacity = 50)]
     fn send_message(mut ctx: send_message::Context, message: PanelToDeskMessage) {
+        let onboard_led = ctx.local.onboard_led;
         ctx.shared.send.lock(|send| {
+            onboard_led.set_low().unwrap();
+
             let (tx_buf, tx) = match send.take().unwrap() {
                 TxTransfer::Idle(buf, tx) => (buf, tx),
                 TxTransfer::Running(transfer) => transfer.wait(),
@@ -460,6 +473,8 @@ mod app {
 
             tx_buf.copy_from_slice(&fill_tx_buffer_with_message(message));
             (*send).replace(TxTransfer::Running(tx.write(tx_buf)));
+
+            onboard_led.set_high().unwrap();
         });
     }
 
