@@ -43,22 +43,42 @@ mod app {
 
     use crate::protocol::*;
 
-    // Typically can go as low as 16 bytes as long as there are no delays (e.g. hprintln! calls)
-    // Simple hprintln! calls require 512 or more
-    // Going too small increases the risk of having a corrupted + incomplete frame.
+    // Buffer size of 32 is the best trade-off between responsiveness and stability.
+    // Buffer size of 16 can result in an unnecessarily large number of interrupts and under/overshoots.
+    // Buffer size of 64 is a little less responsive and also causes under/overshoots.
+    // Buffer size smaller than 16 increases the risk of having a corrupted and/or incomplete frame,
+    // rendering the buffer useless.
+    // Any inline hprintln! calls require a buffer size of 512 or more,
+    // which will also require manually adjusting the TX_BUF_SIZE and NO_KEY_SPAWN_COUNT.
     const RX_BUF_SIZE: usize = 32;
 
     // Should be a multiple of DATA_FRAME_SIZE to ensure Tx is always a whole number of frames
     // Should always be smaller than RX_BUF_SIZE to avoid trying to send more than fits
     // in the RX-interrupt-driven loop
-    const TX_BUF_SIZE: usize = DATA_FRAME_SIZE * 4;
+    // The expression cannot be simplified to TX_BUF_SIZE = RX_BUF_SIZE even though it might look
+    // like that is possible, as RX_BUF_SIZE / DATA_FRAME_SIZE will automatically round down
+    // to the nearest whole integer as they are both integers.
+    const TX_BUF_SIZE: usize = DATA_FRAME_SIZE * (RX_BUF_SIZE / DATA_FRAME_SIZE);
 
     // This is inversely proportional to TX_BUF_SIZE, as there is a minimum amount of time the
     // "no key" signal must be sent for.
-    // Aim for at least 150ms of "no key" between other messages.
-    // At 9600 baud, each byte takes about 1ms, so for a TX_BUF of DATA_FRAME_SIZE * 4 (i.e. 28)
-    // we should choose a NO_KEY_SPAWN_COUNT of around 6
-    const NO_KEY_SPAWN_COUNT: u16 = 6;
+    // Aim for at around 150ms-200ms of "no key" between other messages.
+    // At 9600 baud, each byte takes about 1ms, therefore TX_BUF takes about TX_BUF_SIZE milliseconds
+    const NO_KEY_SPAWN_COUNT: u16 = 200 / (TX_BUF_SIZE as u16);
+
+    // Controls overshoot/undershoot. Adjust if changing the buffer sizes above.
+    // Minimum useful value is 1x step size i.e. 0.5
+    // For RX_BUF_SIZE = 64:
+    //    TARGET_HEIGHT_STOP_DIFFERENCE = 1.5 occasionally undershoots but converges.
+    //    TARGET_HEIGHT_STOP_DIFFERENCE = 1.0 results in occasional undershoot but converges.
+    //    TARGET_HEIGHT_STOP_DIFFERENCE = 0.5 results in fairly frequent overshoot but converges.
+    // For RX_BUF_SIZE = 32:
+    //    TARGET_HEIGHT_STOP_DIFFERENCE = 1.0 works well - no observed overshoot/undershoot.
+    //    TARGET_HEIGHT_STOP_DIFFERENCE = 0.5 occasionally overshoots a little bit.
+    // For RX_BUF_SIZE = 16:
+    //    TARGET_HEIGHT_STOP_DIFFERENCE = 1.0 undershoots and can cause crashes.
+    //    TARGET_HEIGHT_STOP_DIFFERENCE = 0.5 occasionally overshoots a little bit.
+    const TARGET_HEIGHT_STOP_DIFFERENCE: f32 = 1.0;
 
     // Must be > 1
     const MAX_STABLE_ITERATION_COUNT: u16 = 3;
@@ -356,7 +376,8 @@ mod app {
                     }
                     _ => match *ctx_target_height {
                         Some(target_height) => {
-                            if abs_diff_f32(*current_height, target_height) < 1.5
+                            if abs_diff_f32(*current_height, target_height)
+                                <= TARGET_HEIGHT_STOP_DIFFERENCE
                                 && stable_iteration_count < MAX_STABLE_ITERATION_COUNT
                             {
                                 message = Some(PanelToDeskMessage::NoKey);
@@ -438,7 +459,7 @@ mod app {
         }
     }
 
-    #[task(local = [onboard_led], shared = [send], priority = 1, capacity = 10)]
+    #[task(local = [onboard_led], shared = [send], priority = 1, capacity = 20)]
     fn send_message(mut ctx: send_message::Context, message: PanelToDeskMessage) {
         let onboard_led = ctx.local.onboard_led;
         ctx.shared.send.lock(|send| {
