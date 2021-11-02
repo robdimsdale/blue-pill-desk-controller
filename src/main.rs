@@ -105,9 +105,10 @@ mod app {
     // and to ensure we reliably get to the max even if the input is moving very slowly
     const ADC_MAX_VALUE: u16 = 4070;
 
-    const DISPLAY_TARGET_HEIGHT_RESET_INTERVAL_SECONDS: u32 = 3;
-    const DISPLAY_OFF_INTERVAL_SECONDS: u32 = 5;
-    const DISPLAY_UPDATE_INTERVAL_MILLISECONDS: u32 = 10;
+    const DISPLAY_TARGET_HEIGHT_RESET_INTERVAL_SECONDS: u32 = 4;
+    const DISPLAY_OFF_AFTER_SECONDS: u32 = 10;
+    const DISPLAY_FLASH_AFTER_SECONDS: u32 = 1;
+    const DISPLAY_REFRESH_INTERVAL_MILLISECONDS: u32 = 10;
 
     pub enum TxTransfer {
         Running(Transfer<R, &'static mut [u8; TX_BUF_SIZE], TxDma<Tx<USART3>, C2>>),
@@ -150,9 +151,9 @@ mod app {
         stable_iteration_count: u16,
         previous_iteration_height: f32,
 
-        button: gpiob::PB1<Input<PullUp>>,
-
         recv: Option<Transfer<W, &'static mut [u8; RX_BUF_SIZE], RxDma<Rx<USART3>, C3>>>,
+
+        button: gpiob::PB1<Input<PullUp>>,
 
         adc_recv: Option<
             Transfer<
@@ -161,6 +162,7 @@ mod app {
                 RxDma<AdcPayload<gpioa::PA0<Analog>, Continuous>, C1>,
             >,
         >,
+        current_adc_pos: u16,
 
         disp: HT16K33<
             i2c::BlockingI2c<
@@ -173,8 +175,6 @@ mod app {
         >,
         current_disp_value: f32,
         disp_last_changed: Instant<MyMono>,
-
-        current_adc_pos: u16,
 
         onboard_led: gpioc::PC13<Output<PushPull>>,
     }
@@ -243,11 +243,7 @@ mod app {
         const DISP_I2C_ADDR: u8 = 112;
 
         let mut ht16k33 = HT16K33::new(i2c, DISP_I2C_ADDR);
-
         block!(ht16k33.initialize()).expect("Failed to initialize ht16k33");
-
-        ht16k33.set_display(Display::ON).unwrap();
-
         ht16k33.set_dimming(Dimming::BRIGHTNESS_MAX).unwrap();
 
         let tx = gpiob.pb10.into_alternate_push_pull(&mut gpiob.crh);
@@ -266,7 +262,7 @@ mod app {
         let tx = tx_serial.with_dma(dma_channels.2);
         let rx = rx_serial.with_dma(dma_channels.3);
 
-        update_display::spawn_after(DISPLAY_UPDATE_INTERVAL_MILLISECONDS.milliseconds()).unwrap();
+        update_display::spawn_after(DISPLAY_REFRESH_INTERVAL_MILLISECONDS.milliseconds()).unwrap();
         for _ in 0..NO_KEY_SPAWN_COUNT {
             send_message::spawn(PanelToDeskMessage::NoKey).unwrap();
         }
@@ -511,28 +507,34 @@ mod app {
             ctx.shared.disp_mode,
         )
             .lock(|current_height, input_height, disp_mode| {
-                let h = match disp_mode {
-                    DisplayMode::CurrentHeight => *current_height,
-                    DisplayMode::InputHeight => *input_height,
+                let now = monotonics::now();
+
+                let (h, disp_flash) = match disp_mode {
+                    DisplayMode::CurrentHeight => (*current_height, Display::ON),
+                    DisplayMode::InputHeight => (*input_height, Display::TWO_HZ),
                 };
 
                 if h != *current_disp_value {
-                    *disp_last_changed = monotonics::now();
+                    *disp_last_changed = now;
                 }
                 *current_disp_value = h;
 
-                if monotonics::now() > (*disp_last_changed + DISPLAY_OFF_INTERVAL_SECONDS.seconds())
-                {
-                    disp.set_display(Display::OFF).unwrap();
-                } else {
+                let time_to_flash = *disp_last_changed + DISPLAY_FLASH_AFTER_SECONDS.seconds();
+                let time_to_turn_off = *disp_last_changed + DISPLAY_OFF_AFTER_SECONDS.seconds();
+
+                if now < time_to_flash {
                     disp.set_display(Display::ON).unwrap();
+                } else if now >= time_to_flash && now < time_to_turn_off {
+                    disp.set_display(disp_flash).unwrap();
+                } else {
+                    disp.set_display(Display::OFF).unwrap();
                 }
 
                 disp.update_buffer_with_float(Index::One, h, 1, 10).unwrap();
                 disp.write_display_buffer().unwrap();
             });
 
-        update_display::spawn_after(10.milliseconds()).unwrap();
+        update_display::spawn_after(DISPLAY_REFRESH_INTERVAL_MILLISECONDS.milliseconds()).unwrap();
     }
 
     #[task(shared = [disp_mode,reset_display_handler], priority = 1, capacity = 1)]
