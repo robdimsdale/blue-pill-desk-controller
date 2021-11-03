@@ -78,10 +78,11 @@ mod app {
     // For RX_BUF_SIZE = 16:
     //    TARGET_HEIGHT_STOP_DIFFERENCE = 1.0 undershoots and can cause crashes.
     //    TARGET_HEIGHT_STOP_DIFFERENCE = 0.5 occasionally overshoots a little bit.
-    const TARGET_HEIGHT_STOP_DIFFERENCE: f32 = 1.0;
+    // const TARGET_HEIGHT_STOP_DIFFERENCE: f32 = 1.0;
+    const TARGET_HEIGHT_STOP_DIFFERENCE: f32 = 0.5;
 
     // Must be > 1
-    const MAX_STABLE_ITERATION_COUNT: u16 = 3;
+    const MAX_STABLE_ITERATION_COUNT: u16 = 5;
 
     // Should be large enough to allow average (de-noising) and reduce interrupt frequency,
     // while also small enough not to negatively impact response.
@@ -364,11 +365,11 @@ mod app {
 
                 match current_direction {
                     Some(Direction::Reversing) => {
-                        // if no_key_send_count < NO_KEY_ITERATION_COUNT {
-                        //     message = Some(PanelToDeskMessage::NoKey);
-                        // } else {
-                        *current_direction = None;
-                        // }
+                        if no_key_send_count < NO_KEY_SPAWN_COUNT {
+                            message = Some(PanelToDeskMessage::NoKey);
+                        } else {
+                            *current_direction = None;
+                        }
                     }
                     _ => match *ctx_target_height {
                         Some(target_height) => {
@@ -438,15 +439,14 @@ mod app {
         }
 
         *ctx.local.no_key_send_count = no_key_send_count;
-        // *ctx.local.current_direction = current_direction;
         *ctx.local.previous_iteration_height = previous_iteration_height;
         *ctx.local.stable_iteration_count = stable_iteration_count;
 
         match message {
             Some(PanelToDeskMessage::NoKey) => {
-                for _ in 0..NO_KEY_SPAWN_COUNT {
-                    send_message::spawn(PanelToDeskMessage::NoKey).unwrap();
-                }
+                // for _ in 0..NO_KEY_SPAWN_COUNT {
+                send_message::spawn(PanelToDeskMessage::NoKey).unwrap();
+                // }
             }
             Some(m) => {
                 send_message::spawn(m).unwrap();
