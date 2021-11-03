@@ -185,6 +185,7 @@ mod app {
 
     #[init(local = [rx_buf: [u8; RX_BUF_SIZE] = [0; RX_BUF_SIZE], tx_buf: [u8; TX_BUF_SIZE] = [0; TX_BUF_SIZE], adc_buf: [u16; ADC_BUF_SIZE] = [0; ADC_BUF_SIZE]])]
     fn init(mut ctx: init::Context) -> (Shared, Local, init::Monotonics) {
+        ctx.device.RCC.ahbenr.write(|w| w.dma1en().set_bit()); // prevent sleep issues with probe-run
         defmt::info!("Hello, world!");
 
         let mut rcc = ctx.device.RCC.constrain();
