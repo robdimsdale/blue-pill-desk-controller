@@ -15,15 +15,15 @@ mod app {
         peripheral::{syst::SystClkSource, SYST},
     };
     use stm32f1xx_hal::{
-        adc,
-        adc::{AdcPayload, Continuous, SampleTime},
         dma::{
-            dma1::{C1, C2, C3},
+            dma1::{C2, C3},
             Event, RxDma, Transfer, TxDma, R, W,
         },
         gpio::{
-            gpioa, gpiob, gpioc, Alternate, Analog, Edge, ExtiPin, Input, OpenDrain, Output,
-            PullUp, PushPull,
+            gpioa::{PA5, PA6, PA7},
+            gpiob::{PB6, PB7},
+            gpioc::PC13,
+            Alternate, Edge, ExtiPin, Input, OpenDrain, Output, PullUp, PushPull,
         },
         i2c,
         pac::{I2C1, USART3},
@@ -83,31 +83,7 @@ mod app {
     // Must be > 1
     const MAX_STABLE_ITERATION_COUNT: u16 = 3;
 
-    // Should be large enough to allow average (de-noising) and reduce interrupt frequency,
-    // while also small enough not to negatively impact response.
-    // Empirically, around 32 feels response enough without any noticeable noise.
-    const ADC_BUF_SIZE: usize = 32;
-
-    // The total range is 127-65.5 = 62.5 and each 0.5 cm is a step so 62.5 * 2 = 125 steps.
-    // The ADC is 12-bits (i.e. 2^12) but we only really need 125 (i.e. a bit under 2^7),
-    // therefore the max threshold can be a bit over 2^(12-7) = 2^5 = 32.
-    // Set the threshold to 16 to provide good noise reduction
-    // while also not losing too much signal from small (i.e. slow) movements.
-    // We observe that lower than around 16 tends to result in noticeable noise,
-    // and more than around 16 tends to result in noticeable loss of precision,
-    // especially at the max value.
-    const ADC_SMOOTH_THRESHOLD: u16 = 16;
-
-    // 12-bit ADC i.e. 2^12
-    // However, due to intrinsic resistance, we can't ever get to the max value.
-    // We empirically observe a typical max value is about 4090.
-    // We also want to set this lower to account for de-noising (averaging),
-    // and to ensure we reliably get to the max even if the input is moving very slowly
-    const ADC_MAX_VALUE: u16 = 4070;
-
-    const DISPLAY_TARGET_HEIGHT_RESET_INTERVAL_SECONDS: u32 = 4;
     const DISPLAY_OFF_AFTER_SECONDS: u32 = 10;
-    const DISPLAY_FLASH_AFTER_SECONDS: u32 = 1;
     const DISPLAY_REFRESH_INTERVAL_MILLISECONDS: u32 = 10;
 
     pub enum TxTransfer {
@@ -122,11 +98,6 @@ mod app {
         Reversing,
     }
 
-    pub enum DisplayMode {
-        CurrentHeight,
-        InputHeight,
-    }
-
     #[monotonic(binds = SysTick, default = true)]
     type MyMono = Systick<1000>; // 1000 Hz / 1 ms granularity
 
@@ -135,7 +106,6 @@ mod app {
         // TODO: ensure that this doesn't actually result in a deadlock due to the use of
         // transfer.wait() after getting the lock.
         send: Option<TxTransfer>,
-        disp_mode: DisplayMode,
 
         target_height: Option<f32>,
         current_height: f32,
@@ -153,33 +123,19 @@ mod app {
 
         recv: Option<Transfer<W, &'static mut [u8; RX_BUF_SIZE], RxDma<Rx<USART3>, C3>>>,
 
-        button: gpiob::PB1<Input<PullUp>>,
+        button1: PA5<Input<PullUp>>,
+        button2: PA6<Input<PullUp>>,
+        button3: PA7<Input<PullUp>>,
 
-        adc_recv: Option<
-            Transfer<
-                W,
-                &'static mut [u16; ADC_BUF_SIZE],
-                RxDma<AdcPayload<gpioa::PA0<Analog>, Continuous>, C1>,
-            >,
-        >,
-        current_adc_pos: u16,
-
-        disp: HT16K33<
-            i2c::BlockingI2c<
-                I2C1,
-                (
-                    gpiob::PB6<Alternate<OpenDrain>>,
-                    gpiob::PB7<Alternate<OpenDrain>>,
-                ),
-            >,
-        >,
+        disp:
+            HT16K33<i2c::BlockingI2c<I2C1, (PB6<Alternate<OpenDrain>>, PB7<Alternate<OpenDrain>>)>>,
         current_disp_value: f32,
         disp_last_changed: Instant<MyMono>,
 
-        onboard_led: gpioc::PC13<Output<PushPull>>,
+        onboard_led: PC13<Output<PushPull>>,
     }
 
-    #[init(local = [rx_buf: [u8; RX_BUF_SIZE] = [0; RX_BUF_SIZE], tx_buf: [u8; TX_BUF_SIZE] = [0; TX_BUF_SIZE], adc_buf: [u16; ADC_BUF_SIZE] = [0; ADC_BUF_SIZE]])]
+    #[init(local = [rx_buf: [u8; RX_BUF_SIZE] = [0; RX_BUF_SIZE], tx_buf: [u8; TX_BUF_SIZE] = [0; TX_BUF_SIZE]])]
     fn init(mut ctx: init::Context) -> (Shared, Local, init::Monotonics) {
         let mut rcc = ctx.device.RCC.constrain();
         let mut flash = ctx.device.FLASH.constrain();
@@ -201,19 +157,22 @@ mod app {
         let onboard_led = gpioc.pc13.into_push_pull_output(&mut gpioc.crh);
 
         let mut dma_channels = ctx.device.DMA1.split(&mut rcc.ahb);
-        dma_channels.1.listen(Event::TransferComplete);
 
-        // Setup button
-        let mut button = gpiob.pb1.into_pull_up_input(&mut gpiob.crl);
-        button.make_interrupt_source(&mut afio);
-        button.enable_interrupt(&mut ctx.device.EXTI);
-        button.trigger_on_edge(&mut ctx.device.EXTI, Edge::FALLING);
+        // Setup buttons
+        let mut button1 = gpioa.pa5.into_pull_up_input(&mut gpioa.crl);
+        button1.make_interrupt_source(&mut afio);
+        button1.enable_interrupt(&mut ctx.device.EXTI);
+        button1.trigger_on_edge(&mut ctx.device.EXTI, Edge::FALLING);
 
-        // Setup ADC on pin PA0 (potentiometer input)
-        let mut adc1 = adc::Adc::adc1(ctx.device.ADC1, &mut rcc.apb2, clocks);
-        adc1.set_sample_time(SampleTime::T_239); // Slow down the ADC as much as possible
-        let adc_ch0 = gpioa.pa0.into_analog(&mut gpioa.crl);
-        let adc_dma = adc1.with_dma(adc_ch0, dma_channels.1);
+        let mut button2 = gpioa.pa6.into_pull_up_input(&mut gpioa.crl);
+        button2.make_interrupt_source(&mut afio);
+        button2.enable_interrupt(&mut ctx.device.EXTI);
+        button2.trigger_on_edge(&mut ctx.device.EXTI, Edge::FALLING);
+
+        let mut button3 = gpioa.pa7.into_pull_up_input(&mut gpioa.crl);
+        button3.make_interrupt_source(&mut afio);
+        button3.enable_interrupt(&mut ctx.device.EXTI);
+        button3.trigger_on_edge(&mut ctx.device.EXTI, Edge::FALLING);
 
         // Set up the I2C bus on pins PB6 and PB7 (display)
         let scl = gpiob.pb6.into_alternate_open_drain(&mut gpiob.crl);
@@ -270,7 +229,6 @@ mod app {
         (
             Shared {
                 send: Some(TxTransfer::Idle(ctx.local.tx_buf, tx)),
-                disp_mode: DisplayMode::InputHeight,
                 target_height: None,
                 current_height: 0.0,
                 input_height: 0.0,
@@ -282,12 +240,12 @@ mod app {
                 current_disp_value: 0.0,
                 disp_last_changed: Instant::<MyMono>::new(0),
                 recv: Some(rx.read(ctx.local.rx_buf)),
-                adc_recv: Some(adc_dma.read(ctx.local.adc_buf)),
-                current_adc_pos: 0,
                 no_key_send_count: 0,
                 stable_iteration_count: 0,
                 previous_iteration_height: 0.0,
-                button: button,
+                button1: button1,
+                button2: button2,
+                button3: button3,
                 onboard_led: onboard_led,
             },
             init::Monotonics(mono),
@@ -309,7 +267,7 @@ mod app {
         ctx.local.recv.replace(rx.read(rx_buf));
     }
 
-    #[task(shared = [current_height, disp_mode], priority = 2, capacity = 2)]
+    #[task(shared = [current_height], priority = 2, capacity = 2)]
     fn read_height(mut ctx: read_height::Context, data: [u8; RX_BUF_SIZE]) {
         let frame = find_first_frame(&data);
         if validate_frame(&frame) {
@@ -495,87 +453,83 @@ mod app {
         });
     }
 
-    #[task(local = [disp, current_disp_value, disp_last_changed], shared = [current_height, disp_mode, input_height], priority = 1)]
-    fn update_display(ctx: update_display::Context) {
+    #[task(local = [disp, current_disp_value, disp_last_changed], shared = [current_height, input_height], priority = 1)]
+    fn update_display(mut ctx: update_display::Context) {
         let disp = ctx.local.disp;
         let current_disp_value = ctx.local.current_disp_value;
         let disp_last_changed = ctx.local.disp_last_changed;
 
-        (
-            ctx.shared.current_height,
-            ctx.shared.input_height,
-            ctx.shared.disp_mode,
-        )
-            .lock(|current_height, input_height, disp_mode| {
-                let now = monotonics::now();
+        ctx.shared.current_height.lock(|current_height| {
+            let now = monotonics::now();
 
-                let (h, disp_flash) = match disp_mode {
-                    DisplayMode::CurrentHeight => (*current_height, Display::ON),
-                    DisplayMode::InputHeight => (*input_height, Display::TWO_HZ),
-                };
+            let h = *current_height;
 
-                if h != *current_disp_value {
-                    *disp_last_changed = now;
-                }
-                *current_disp_value = h;
+            if h != *current_disp_value {
+                *disp_last_changed = now;
+            }
+            *current_disp_value = h;
 
-                let time_to_flash = *disp_last_changed + DISPLAY_FLASH_AFTER_SECONDS.seconds();
-                let time_to_turn_off = *disp_last_changed + DISPLAY_OFF_AFTER_SECONDS.seconds();
+            let time_to_turn_off = *disp_last_changed + DISPLAY_OFF_AFTER_SECONDS.seconds();
 
-                if now < time_to_flash {
-                    disp.set_display(Display::ON).unwrap();
-                } else if now >= time_to_flash && now < time_to_turn_off {
-                    disp.set_display(disp_flash).unwrap();
-                } else {
-                    disp.set_display(Display::OFF).unwrap();
-                }
+            if now < time_to_turn_off {
+                disp.set_display(Display::ON).unwrap();
+            } else {
+                disp.set_display(Display::OFF).unwrap();
+            }
 
-                disp.update_buffer_with_float(Index::One, h, 1, 10).unwrap();
-                disp.write_display_buffer().unwrap();
-            });
+            disp.update_buffer_with_float(Index::One, h, 1, 10).unwrap();
+            disp.write_display_buffer().unwrap();
+        });
 
         update_display::spawn_after(DISPLAY_REFRESH_INTERVAL_MILLISECONDS.milliseconds()).unwrap();
     }
 
-    #[task(shared = [disp_mode,reset_display_handler], priority = 1, capacity = 1)]
-    fn reset_display_mode(ctx: reset_display_mode::Context) {
-        (ctx.shared.disp_mode, ctx.shared.reset_display_handler).lock(
-            |disp_mode, reset_display_handler| {
-                *disp_mode = DisplayMode::CurrentHeight;
+    #[task(shared = [reset_display_handler], priority = 1, capacity = 1)]
+    fn reset_display_mode(mut ctx: reset_display_mode::Context) {
+        ctx.shared
+            .reset_display_handler
+            .lock(|reset_display_handler| {
                 *reset_display_handler = None;
-            },
-        );
+            });
     }
 
-    // Triggers on button pressed
-    #[task(binds = EXTI1, local = [button], shared = [disp_mode, input_height, target_height], priority = 1)]
-    fn on_btn_press(ctx: on_btn_press::Context) {
-        let button = ctx.local.button;
-        if button.check_interrupt() {
-            button.clear_interrupt_pending_bit();
-            (
-                ctx.shared.disp_mode,
-                ctx.shared.input_height,
-                ctx.shared.target_height,
-            )
-                .lock(|disp_mode, input_height, target_height| {
-                    // TODO: replace with more useful code when we have multiple buttons
-                    // match target_height {
-                    //     None => {
-                    //         *target_height = Some(*input_height);
-                    //     }
-                    //     Some(_) => {
-                    //         *target_height = None;
-                    //         stop_moving::spawn().unwrap();
-                    //     }
-                    // }
+    pub enum ButtonPress {
+        Height(f32),
+        Stop,
+    }
 
-                    *target_height = Some(*input_height);
-                    // stop_moving::spawn_after(3.seconds()).unwrap();
+    // Triggers on buttons pressed
+    #[task(binds = EXTI9_5, local = [button1, button2, button3], shared = [target_height], priority = 1)]
+    fn on_btn_press(mut ctx: on_btn_press::Context) {
+        let button1 = ctx.local.button1;
+        let button2 = ctx.local.button2;
+        let button3 = ctx.local.button3;
 
-                    *disp_mode = DisplayMode::CurrentHeight;
-                });
+        let button_press;
+        if button1.check_interrupt() {
+            button_press = ButtonPress::Height(65.0);
+            button1.clear_interrupt_pending_bit();
+        } else if button2.check_interrupt() {
+            button_press = ButtonPress::Height(100.0);
+            button2.clear_interrupt_pending_bit();
+        } else if button3.check_interrupt() {
+            button_press = ButtonPress::Stop;
+            button3.clear_interrupt_pending_bit();
+        } else {
+            panic!("unexpected button press");
         }
+
+        ctx.shared
+            .target_height
+            .lock(|target_height| match button_press {
+                ButtonPress::Height(h) => {
+                    *target_height = Some(h);
+                }
+                ButtonPress::Stop => {
+                    stop_moving::spawn().unwrap();
+                }
+            });
+        return;
     }
 
     #[task(shared = [current_direction, target_height], priority = 3, capacity = 5)]
@@ -590,99 +544,12 @@ mod app {
         send_message::spawn(PanelToDeskMessage::NoKey).unwrap();
     }
 
-    // Triggers on ADC read completed
-    #[task(binds = DMA1_CHANNEL1, local = [adc_recv, current_adc_pos], shared = [disp_mode, input_height,reset_display_handler], priority = 1)]
-    fn on_adc_read(mut ctx: on_adc_read::Context) {
-        let (rx_buf, rx) = ctx.local.adc_recv.take().unwrap().wait();
-
-        // Cast to u32 to enable summation as u32 and avoid overrun which would often occur
-        // if we tried to sum as u16.
-        // The max value in the buffer is 2^12 - 1, and the max u16 value is 2^16 - 1,
-        // so if the buffer size is > 2^4 then we will see overrun for large values:
-        // 2^4 * (2^12-1) is close to 2^16
-        let avg = (&rx_buf.iter().map(|&x| x as u32).sum::<u32>() / (rx_buf.len() as u32)) as u16;
-
-        let (new_position, above_threshold) = threshold_smooth_adc(avg, *ctx.local.current_adc_pos);
-
-        let height = normalize_input_height(new_position);
-        *ctx.local.current_adc_pos = new_position;
-
-        ctx.shared.input_height.lock(|input_height| {
-            *input_height = height;
-        });
-
-        if above_threshold {
-            (ctx.shared.disp_mode, ctx.shared.reset_display_handler).lock(
-                |disp_mode, reset_display_handler| {
-                    *disp_mode = DisplayMode::InputHeight;
-
-                    *reset_display_handler = Some(match *reset_display_handler {
-                        None => reset_display_mode::spawn_after(
-                            DISPLAY_TARGET_HEIGHT_RESET_INTERVAL_SECONDS.seconds(),
-                        )
-                        .unwrap(),
-
-                        // Have to take the original reference as the reschedule_after consumes self
-                        Some(_) => reset_display_handler
-                            .take()
-                            .unwrap()
-                            // This could possibly fail for a valid reason if the other task has started execution and this one preempts it.
-                            // This won't happen as long as the priority of this task is lower than or equal to the priority of the other task.
-                            // And in any case it is an extremely small window as the other task immediately gets a lock on the shared reset_display_handler.
-                            .reschedule_after(
-                                DISPLAY_TARGET_HEIGHT_RESET_INTERVAL_SECONDS.seconds(),
-                            )
-                            .unwrap(),
-                    });
-                },
-            );
-        }
-
-        ctx.local.adc_recv.replace(rx.read(rx_buf));
-    }
-
-    fn threshold_smooth_adc(val: u16, prev_val: u16) -> (u16, bool) {
-        if abs_diff_u16(val, prev_val) > ADC_SMOOTH_THRESHOLD {
-            (val, true)
-        } else {
-            (prev_val, false)
-        }
-    }
-
-    fn abs_diff_u16(a: u16, b: u16) -> u16 {
-        if a > b {
-            return a - b;
-        } else {
-            return b - a;
-        }
-    }
-
     fn abs_diff_f32(a: f32, b: f32) -> f32 {
         if a > b {
             return a - b;
         } else {
             return b - a;
         }
-    }
-
-    fn normalize_input_height(adc_pos: u16) -> f32 {
-        let min_pos = 65.0;
-        let max_pos = 127.5;
-        let step_size = 0.5;
-
-        let ratio = adc_pos as f32 / ADC_MAX_VALUE as f32;
-
-        let mut pos: f32 = ratio * (max_pos - min_pos) + min_pos;
-
-        pos = round_to_nearest(pos, step_size);
-
-        return pos;
-    }
-
-    fn round_to_nearest(val: f32, round_to: f32) -> f32 {
-        let rounded_multiple = (val / round_to) as u16;
-        let x = rounded_multiple as f32 * round_to;
-        return x;
     }
 
     /// Systick implementing `embedded_time::Clock` and `rtic_monotonic::Monotonic` which runs at a
