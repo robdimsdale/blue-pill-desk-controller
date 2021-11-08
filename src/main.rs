@@ -109,8 +109,9 @@ mod app {
 
         target_height: Option<f32>,
         current_height: f32,
-        input_height: f32,
         current_direction: Option<Direction>,
+
+        disp_force_on: bool,
 
         reset_display_handler: Option<reset_display_mode::SpawnHandle>,
     }
@@ -231,7 +232,7 @@ mod app {
                 send: Some(TxTransfer::Idle(ctx.local.tx_buf, tx)),
                 target_height: None,
                 current_height: 0.0,
-                input_height: 0.0,
+                disp_force_on: false,
                 current_direction: None,
                 reset_display_handler: None,
             },
@@ -453,33 +454,41 @@ mod app {
         });
     }
 
-    #[task(local = [disp, current_disp_value, disp_last_changed], shared = [current_height, input_height], priority = 1)]
+    #[task(local = [disp, current_disp_value, disp_last_changed], shared = [current_height, disp_force_on], priority = 1)]
     fn update_display(mut ctx: update_display::Context) {
         let disp = ctx.local.disp;
         let current_disp_value = ctx.local.current_disp_value;
         let disp_last_changed = ctx.local.disp_last_changed;
 
-        ctx.shared.current_height.lock(|current_height| {
-            let now = monotonics::now();
+        (ctx.shared.current_height, ctx.shared.disp_force_on).lock(
+            |current_height, disp_force_on| {
+                let now = monotonics::now();
 
-            let h = *current_height;
+                let h = *current_height;
 
-            if h != *current_disp_value {
-                *disp_last_changed = now;
-            }
-            *current_disp_value = h;
+                if h != *current_disp_value {
+                    *disp_last_changed = now;
+                }
 
-            let time_to_turn_off = *disp_last_changed + DISPLAY_OFF_AFTER_SECONDS.seconds();
+                if *disp_force_on {
+                    *disp_last_changed = now;
+                    *disp_force_on = false;
+                }
 
-            if now < time_to_turn_off {
-                disp.set_display(Display::ON).unwrap();
-            } else {
-                disp.set_display(Display::OFF).unwrap();
-            }
+                *current_disp_value = h;
 
-            disp.update_buffer_with_float(Index::One, h, 1, 10).unwrap();
-            disp.write_display_buffer().unwrap();
-        });
+                let time_to_turn_off = *disp_last_changed + DISPLAY_OFF_AFTER_SECONDS.seconds();
+
+                if now < time_to_turn_off {
+                    disp.set_display(Display::ON).unwrap();
+                } else {
+                    disp.set_display(Display::OFF).unwrap();
+                }
+
+                disp.update_buffer_with_float(Index::One, h, 1, 10).unwrap();
+                disp.write_display_buffer().unwrap();
+            },
+        );
 
         update_display::spawn_after(DISPLAY_REFRESH_INTERVAL_MILLISECONDS.milliseconds()).unwrap();
     }
@@ -499,7 +508,7 @@ mod app {
     }
 
     // Triggers on buttons pressed
-    #[task(binds = EXTI9_5, local = [button1, button2, button3], shared = [target_height], priority = 1)]
+    #[task(binds = EXTI9_5, local = [button1, button2, button3], shared = [disp_force_on, target_height], priority = 1)]
     fn on_btn_press(mut ctx: on_btn_press::Context) {
         let button1 = ctx.local.button1;
         let button2 = ctx.local.button2;
@@ -519,16 +528,20 @@ mod app {
             panic!("unexpected button press");
         }
 
-        ctx.shared
-            .target_height
-            .lock(|target_height| match button_press {
-                ButtonPress::Height(h) => {
-                    *target_height = Some(h);
-                }
-                ButtonPress::Stop => {
-                    stop_moving::spawn().unwrap();
-                }
-            });
+        (ctx.shared.disp_force_on, ctx.shared.target_height).lock(
+            |disp_force_on, target_height| {
+                match button_press {
+                    ButtonPress::Height(h) => {
+                        *target_height = Some(h);
+                    }
+                    ButtonPress::Stop => {
+                        stop_moving::spawn().unwrap();
+                    }
+                };
+
+                *disp_force_on = true;
+            },
+        );
         return;
     }
 
