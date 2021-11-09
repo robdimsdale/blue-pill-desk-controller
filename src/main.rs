@@ -515,7 +515,6 @@ mod app {
         let button_stop = ctx.local.button_stop;
 
         if button_stop.check_interrupt() {
-            stop_moving::spawn().unwrap();
             button_stop.clear_interrupt_pending_bit();
         } else {
             panic!("unexpected button press");
@@ -524,7 +523,8 @@ mod app {
         ctx.shared.disp_force_on.lock(|disp_force_on| {
             *disp_force_on = true;
         });
-        return;
+
+        stop_moving::spawn().unwrap();
     }
 
     // Triggers on buttons pressed
@@ -554,7 +554,6 @@ mod app {
                 *disp_force_on = true;
             },
         );
-        return;
     }
 
     #[task(shared = [current_direction, target_height], priority = 3, capacity = 5)]
