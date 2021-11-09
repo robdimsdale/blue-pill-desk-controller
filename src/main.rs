@@ -16,17 +16,17 @@ mod app {
     };
     use stm32f1xx_hal::{
         dma::{
-            dma1::{C2, C3},
+            dma1::{C4, C5},
             Event, RxDma, Transfer, TxDma, R, W,
         },
         gpio::{
             gpioa::{PA5, PA6, PA7},
-            gpiob::{PB6, PB7},
+            gpiob::{PB10, PB11},
             gpioc::PC13,
             Alternate, Edge, ExtiPin, Input, OpenDrain, Output, PullUp, PushPull,
         },
         i2c,
-        pac::{I2C1, USART3},
+        pac::{I2C2, USART1},
         prelude::*,
         serial::{Config, Rx, Serial, Tx},
     };
@@ -87,8 +87,8 @@ mod app {
     const DISPLAY_REFRESH_INTERVAL_MILLISECONDS: u32 = 10;
 
     pub enum TxTransfer {
-        Running(Transfer<R, &'static mut [u8; TX_BUF_SIZE], TxDma<Tx<USART3>, C2>>),
-        Idle(&'static mut [u8; TX_BUF_SIZE], TxDma<Tx<USART3>, C2>),
+        Running(Transfer<R, &'static mut [u8; TX_BUF_SIZE], TxDma<Tx<USART1>, C4>>),
+        Idle(&'static mut [u8; TX_BUF_SIZE], TxDma<Tx<USART1>, C4>),
     }
 
     #[derive(Clone, Copy, PartialEq)]
@@ -122,14 +122,15 @@ mod app {
         stable_iteration_count: u16,
         previous_iteration_height: f32,
 
-        recv: Option<Transfer<W, &'static mut [u8; RX_BUF_SIZE], RxDma<Rx<USART3>, C3>>>,
+        recv: Option<Transfer<W, &'static mut [u8; RX_BUF_SIZE], RxDma<Rx<USART1>, C5>>>,
 
         button1: PA5<Input<PullUp>>,
         button2: PA6<Input<PullUp>>,
         button3: PA7<Input<PullUp>>,
 
-        disp:
-            HT16K33<i2c::BlockingI2c<I2C1, (PB6<Alternate<OpenDrain>>, PB7<Alternate<OpenDrain>>)>>,
+        disp: HT16K33<
+            i2c::BlockingI2c<I2C2, (PB10<Alternate<OpenDrain>>, PB11<Alternate<OpenDrain>>)>,
+        >,
         current_disp_value: f32,
         disp_last_changed: Instant<MyMono>,
 
@@ -176,8 +177,8 @@ mod app {
         button3.trigger_on_edge(&mut ctx.device.EXTI, Edge::FALLING);
 
         // Set up the I2C bus on pins PB6 and PB7 (display)
-        let scl = gpiob.pb6.into_alternate_open_drain(&mut gpiob.crl);
-        let sda = gpiob.pb7.into_alternate_open_drain(&mut gpiob.crl);
+        let scl = gpiob.pb10.into_alternate_open_drain(&mut gpiob.crh);
+        let sda = gpiob.pb11.into_alternate_open_drain(&mut gpiob.crh);
         let mode = i2c::Mode::Standard {
             frequency: 100_000.hz(),
         };
@@ -187,10 +188,9 @@ mod app {
         let addr_timeout_us: u32 = 10000;
         let data_timeout_us: u32 = 10000;
 
-        let i2c = i2c::BlockingI2c::i2c1(
-            ctx.device.I2C1,
+        let i2c = i2c::BlockingI2c::i2c2(
+            ctx.device.I2C2,
             (scl, sda),
-            &mut afio.mapr,
             mode,
             clocks,
             &mut rcc.apb1,
@@ -206,21 +206,21 @@ mod app {
         block!(ht16k33.initialize()).expect("Failed to initialize ht16k33");
         ht16k33.set_dimming(Dimming::BRIGHTNESS_MAX).unwrap();
 
-        let tx = gpiob.pb10.into_alternate_push_pull(&mut gpiob.crh);
-        let rx = gpiob.pb11;
-        let serial = Serial::usart3(
-            ctx.device.USART3,
+        let tx = gpiob.pb6.into_alternate_push_pull(&mut gpiob.crl);
+        let rx = gpiob.pb7;
+        let serial = Serial::usart1(
+            ctx.device.USART1,
             (tx, rx),
             &mut afio.mapr,
             Config::default().baudrate(9_600.bps()),
             clocks,
-            &mut rcc.apb1,
+            &mut rcc.apb2,
         );
-        dma_channels.2.listen(Event::TransferComplete);
-        dma_channels.3.listen(Event::TransferComplete);
+        dma_channels.4.listen(Event::TransferComplete);
+        dma_channels.5.listen(Event::TransferComplete);
         let (tx_serial, rx_serial) = serial.split();
-        let tx = tx_serial.with_dma(dma_channels.2);
-        let rx = rx_serial.with_dma(dma_channels.3);
+        let tx = tx_serial.with_dma(dma_channels.4);
+        let rx = rx_serial.with_dma(dma_channels.5);
 
         update_display::spawn_after(DISPLAY_REFRESH_INTERVAL_MILLISECONDS.milliseconds()).unwrap();
         for _ in 0..NO_KEY_SPAWN_COUNT {
@@ -261,7 +261,7 @@ mod app {
     }
 
     // Triggers on RX transfer completed
-    #[task(binds = DMA1_CHANNEL3, local = [recv], priority = 4)]
+    #[task(binds = DMA1_CHANNEL5, local = [recv], priority = 4)]
     fn on_rx(ctx: on_rx::Context) {
         let (rx_buf, rx) = ctx.local.recv.take().unwrap().wait();
         read_height::spawn(*rx_buf).unwrap();
@@ -443,7 +443,7 @@ mod app {
     }
 
     // Triggers on TX transfer completed
-    #[task(binds = DMA1_CHANNEL2, shared = [send], priority = 2)]
+    #[task(binds = DMA1_CHANNEL4, shared = [send], priority = 2)]
     fn on_tx(mut ctx: on_tx::Context) {
         ctx.shared.send.lock(|send| {
             let (tx_buf, tx) = match send.take().unwrap() {
