@@ -462,7 +462,7 @@ mod app {
     }
 
     #[task(local = [disp, current_disp_value, disp_last_changed], shared = [current_height, disp_force_on], priority = 1)]
-    fn update_display(mut ctx: update_display::Context) {
+    fn update_display(ctx: update_display::Context) {
         let disp = ctx.local.disp;
         let current_disp_value = ctx.local.current_disp_value;
         let disp_last_changed = ctx.local.disp_last_changed;
@@ -529,7 +529,7 @@ mod app {
 
     // Triggers on buttons pressed
     #[task(binds = EXTI9_5, local = [button1, button2, button3], shared = [disp_force_on, target_height], priority = 1)]
-    fn on_btn_press(mut ctx: on_btn_press::Context) {
+    fn on_btn_press(ctx: on_btn_press::Context) {
         let button1 = ctx.local.button1;
         let button2 = ctx.local.button2;
         let button3 = ctx.local.button3;
