@@ -8,7 +8,7 @@ mod protocol;
 use panic_reset as _;
 
 // from: https://github.com/kalkyl/f103-rtic/blob/main/src/bin/serial.rs
-#[rtic::app(device = stm32f1xx_hal::pac, peripherals = true, dispatchers = [EXTI2, EXTI3, EXTI4])]
+#[rtic::app(device = stm32f1xx_hal::pac, peripherals = true, dispatchers = [EXTI1, EXTI2, EXTI3])]
 mod app {
     use cortex_m::{
         asm,
@@ -20,7 +20,7 @@ mod app {
             Event, RxDma, Transfer, TxDma, R, W,
         },
         gpio::{
-            gpioa::{PA5, PA6, PA7},
+            gpioa::{PA4, PA5, PA6, PA7},
             gpiob::{PB10, PB11},
             gpioc::PC13,
             Alternate, Edge, ExtiPin, Input, OpenDrain, Output, PullUp, PushPull,
@@ -124,6 +124,7 @@ mod app {
 
         recv: Option<Transfer<W, &'static mut [u8; RX_BUF_SIZE], RxDma<Rx<USART1>, C5>>>,
 
+        button_stop: PA4<Input<PullUp>>,
         button1: PA5<Input<PullUp>>,
         button2: PA6<Input<PullUp>>,
         button3: PA7<Input<PullUp>>,
@@ -161,6 +162,11 @@ mod app {
         let mut dma_channels = ctx.device.DMA1.split(&mut rcc.ahb);
 
         // Setup buttons
+        let mut button_stop = gpioa.pa4.into_pull_up_input(&mut gpioa.crl);
+        button_stop.make_interrupt_source(&mut afio);
+        button_stop.enable_interrupt(&mut ctx.device.EXTI);
+        button_stop.trigger_on_edge(&mut ctx.device.EXTI, Edge::FALLING);
+
         let mut button1 = gpioa.pa5.into_pull_up_input(&mut gpioa.crl);
         button1.make_interrupt_source(&mut afio);
         button1.enable_interrupt(&mut ctx.device.EXTI);
@@ -244,6 +250,7 @@ mod app {
                 no_key_send_count: 0,
                 stable_iteration_count: 0,
                 previous_iteration_height: 0.0,
+                button_stop: button_stop,
                 button1: button1,
                 button2: button2,
                 button3: button3,
@@ -502,9 +509,22 @@ mod app {
             });
     }
 
-    pub enum ButtonPress {
-        Height(f32),
-        Stop,
+    // Triggers on buttons pressed
+    #[task(binds = EXTI4, local = [button_stop], shared = [disp_force_on], priority = 2)]
+    fn on_btn_stop_press(mut ctx: on_btn_stop_press::Context) {
+        let button_stop = ctx.local.button_stop;
+
+        if button_stop.check_interrupt() {
+            stop_moving::spawn().unwrap();
+            button_stop.clear_interrupt_pending_bit();
+        } else {
+            panic!("unexpected button press");
+        }
+
+        ctx.shared.disp_force_on.lock(|disp_force_on| {
+            *disp_force_on = true;
+        });
+        return;
     }
 
     // Triggers on buttons pressed
@@ -514,15 +534,15 @@ mod app {
         let button2 = ctx.local.button2;
         let button3 = ctx.local.button3;
 
-        let button_press;
+        let h;
         if button1.check_interrupt() {
-            button_press = ButtonPress::Height(65.0);
+            h = 65.0;
             button1.clear_interrupt_pending_bit();
         } else if button2.check_interrupt() {
-            button_press = ButtonPress::Height(100.0);
+            h = 100.0;
             button2.clear_interrupt_pending_bit();
         } else if button3.check_interrupt() {
-            button_press = ButtonPress::Stop;
+            h = 129.5;
             button3.clear_interrupt_pending_bit();
         } else {
             panic!("unexpected button press");
@@ -530,15 +550,7 @@ mod app {
 
         (ctx.shared.disp_force_on, ctx.shared.target_height).lock(
             |disp_force_on, target_height| {
-                match button_press {
-                    ButtonPress::Height(h) => {
-                        *target_height = Some(h);
-                    }
-                    ButtonPress::Stop => {
-                        stop_moving::spawn().unwrap();
-                    }
-                };
-
+                *target_height = Some(h);
                 *disp_force_on = true;
             },
         );
