@@ -125,9 +125,9 @@ mod app {
         recv: Option<Transfer<W, &'static mut [u8; RX_BUF_SIZE], RxDma<Rx<USART1>, C5>>>,
 
         button_stop: PA4<Input<PullUp>>,
-        button1: PA5<Input<PullUp>>,
+        button1: PA7<Input<PullUp>>,
         button2: PA6<Input<PullUp>>,
-        button3: PA7<Input<PullUp>>,
+        button3: PA5<Input<PullUp>>,
 
         disp: HT16K33<
             i2c::BlockingI2c<I2C2, (PB10<Alternate<OpenDrain>>, PB11<Alternate<OpenDrain>>)>,
@@ -167,7 +167,7 @@ mod app {
         button_stop.enable_interrupt(&mut ctx.device.EXTI);
         button_stop.trigger_on_edge(&mut ctx.device.EXTI, Edge::FALLING);
 
-        let mut button1 = gpioa.pa5.into_pull_up_input(&mut gpioa.crl);
+        let mut button1 = gpioa.pa7.into_pull_up_input(&mut gpioa.crl);
         button1.make_interrupt_source(&mut afio);
         button1.enable_interrupt(&mut ctx.device.EXTI);
         button1.trigger_on_edge(&mut ctx.device.EXTI, Edge::FALLING);
@@ -177,7 +177,7 @@ mod app {
         button2.enable_interrupt(&mut ctx.device.EXTI);
         button2.trigger_on_edge(&mut ctx.device.EXTI, Edge::FALLING);
 
-        let mut button3 = gpioa.pa7.into_pull_up_input(&mut gpioa.crl);
+        let mut button3 = gpioa.pa5.into_pull_up_input(&mut gpioa.crl);
         button3.make_interrupt_source(&mut afio);
         button3.enable_interrupt(&mut ctx.device.EXTI);
         button3.trigger_on_edge(&mut ctx.device.EXTI, Edge::FALLING);
