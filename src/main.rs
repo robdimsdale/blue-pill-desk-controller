@@ -13,8 +13,8 @@ mod app {
     };
     use stm32f1xx_hal::{
         dma::{
-            dma1::{C4, C5},
-            Event, RxDma, Transfer, TxDma, R, W,
+            dma1::{C4, C5, C6},
+            Event, RxDma, Transfer, TransferPayload, TxDma, R, W,
         },
         gpio::{
             gpioa::{PA4, PA5, PA6, PA7},
@@ -23,7 +23,7 @@ mod app {
             Alternate, Edge, ExtiPin, Input, OpenDrain, Output, PullUp, PushPull,
         },
         i2c,
-        pac::{I2C2, USART1},
+        pac::{I2C2, USART1, USART2},
         prelude::*,
         serial::{Config, Rx, Serial, Tx},
     };
@@ -111,6 +111,7 @@ mod app {
         disp_force_on: bool,
 
         reset_display_handler: Option<reset_display_mode::SpawnHandle>,
+        // desk_recv: VariDesk2020Rx,
     }
 
     #[local]
@@ -119,7 +120,8 @@ mod app {
         stable_iteration_count: u16,
         previous_iteration_height: f32,
 
-        recv: Option<Transfer<W, &'static mut [u8; RX_BUF_SIZE], RxDma<Rx<USART1>, C5>>>,
+        // recv: Option<Transfer<W, &'static mut [u8; RX_BUF_SIZE], RxDma<Rx<USART1>, C5>>>,
+        desk_recv: VariDesk2020Rx<USART1, C5>,
 
         button_stop: PA4<Input<PullUp>>,
         button1: PA7<Input<PullUp>>,
@@ -133,6 +135,91 @@ mod app {
         disp_last_changed: Instant<MyMono>,
 
         onboard_led: PC13<Output<PushPull>>,
+    }
+
+    pub struct VariDesk2020Rx<USART, RXCH>
+    where
+        RxDma<Rx<USART>, RXCH>: TransferPayload,
+    {
+        recv: Option<Transfer<W, &'static mut [u8; RX_BUF_SIZE], RxDma<Rx<USART>, RXCH>>>,
+    }
+
+    impl<USART, RXCH> VariDesk2020Rx<USART, RXCH>
+    where
+        RxDma<Rx<USART>, RXCH>: TransferPayload,
+    {
+        fn read_height_from_buffer(&self, data: &[u8; RX_BUF_SIZE]) -> f32 {
+            let frame = self.find_first_frame(&data);
+            if validate_frame(&frame) {
+                match DeskToPanelMessage::from_frame(&frame) {
+                    DeskToPanelMessage::Height(h) => h,
+                    DeskToPanelMessage::Unknown(_, _, _, _, _) => {
+                        0.0 // TODO:
+                    }
+                }
+            } else {
+                return 0.0; // TODO:
+            }
+        }
+
+        fn find_first_frame(&self, buf: &[u8; RX_BUF_SIZE]) -> [u8; DATA_FRAME_SIZE] {
+            let mut frame = [0; DATA_FRAME_SIZE];
+            for (i, x) in buf.iter().enumerate() {
+                if is_start_byte(*x) {
+                    frame[0..DATA_FRAME_SIZE].copy_from_slice(&buf[i..i + DATA_FRAME_SIZE]);
+                    return frame;
+                }
+            }
+            return [0; DATA_FRAME_SIZE];
+        }
+    }
+
+    impl VariDesk2020Rx<USART1, C5> {
+        fn new_usart1(
+            rx: RxDma<Rx<USART1>, C5>,
+            buf: &'static mut [u8; RX_BUF_SIZE],
+        ) -> VariDesk2020Rx<USART1, C5> {
+            VariDesk2020Rx {
+                recv: Some(rx.read(buf)),
+            }
+        }
+
+        fn read_buffer(&mut self) -> [u8; RX_BUF_SIZE] {
+            let (rx_buf, rx) = self.recv.take().unwrap().wait();
+            let r = *rx_buf;
+            self.recv.replace(rx.read(rx_buf));
+
+            return r;
+        }
+
+        fn read_height(&mut self) -> f32 {
+            let b = self.read_buffer();
+            self.read_height_from_buffer(&b)
+        }
+    }
+
+    impl VariDesk2020Rx<USART2, C6> {
+        fn new_usart2(
+            rx: RxDma<Rx<USART2>, C6>,
+            buf: &'static mut [u8; RX_BUF_SIZE],
+        ) -> VariDesk2020Rx<USART2, C6> {
+            VariDesk2020Rx {
+                recv: Some(rx.read(buf)),
+            }
+        }
+
+        fn read_buffer(&mut self) -> [u8; RX_BUF_SIZE] {
+            let (rx_buf, rx) = self.recv.take().unwrap().wait();
+            let r = *rx_buf;
+            self.recv.replace(rx.read(rx_buf));
+
+            return r;
+        }
+
+        fn read_height(&mut self) -> f32 {
+            let b = self.read_buffer();
+            self.read_height_from_buffer(&b)
+        }
     }
 
     #[init(local = [rx_buf: [u8; RX_BUF_SIZE] = [0; RX_BUF_SIZE], tx_buf: [u8; TX_BUF_SIZE] = [0; TX_BUF_SIZE]])]
@@ -238,12 +325,15 @@ mod app {
                 disp_force_on: false,
                 current_direction: None,
                 reset_display_handler: None,
+                // desk_recv: VariDesk2020Rx::new(rx, ctx.local.rx_buf),
             },
             Local {
                 disp: ht16k33,
                 current_disp_value: 0.0,
                 disp_last_changed: Instant::<MyMono>::new(0),
-                recv: Some(rx.read(ctx.local.rx_buf)),
+                // recv: Some(rx.read(ctx.local.rx_buf)),
+                // desk_recv: VariDesk2020Rx::new(rx.read(ctx.local.rx_buf)),
+                desk_recv: VariDesk2020Rx::new_usart1(rx, ctx.local.rx_buf),
                 no_key_send_count: 0,
                 stable_iteration_count: 0,
                 previous_iteration_height: 0.0,
@@ -265,44 +355,18 @@ mod app {
     }
 
     // Triggers on RX transfer completed
-    #[task(binds = DMA1_CHANNEL5, local = [recv], priority = 4)]
-    fn on_rx(ctx: on_rx::Context) {
-        let (rx_buf, rx) = ctx.local.recv.take().unwrap().wait();
-        read_height::spawn(*rx_buf).unwrap();
-        ctx.local.recv.replace(rx.read(rx_buf));
-    }
+    #[task(binds = DMA1_CHANNEL5, shared = [current_height], local = [desk_recv], priority = 4)]
+    fn on_rx(mut ctx: on_rx::Context) {
+        let height = ctx.local.desk_recv.read_height();
 
-    #[task(shared = [current_height], priority = 2, capacity = 2)]
-    fn read_height(mut ctx: read_height::Context, data: [u8; RX_BUF_SIZE]) {
-        let frame = find_first_frame(&data);
-        if validate_frame(&frame) {
-            match DeskToPanelMessage::from_frame(&frame) {
-                DeskToPanelMessage::Height(h) => {
-                    ctx.shared.current_height.lock(|current_height| {
-                        *current_height = h;
-                    });
+        ctx.shared.current_height.lock(|current_height| {
+            *current_height = height;
+        });
 
-                    // Explicitly ignore a failed spawn attempt.
-                    // We do not care if we miss an opportunity to potentially send a message
-                    // as we will catch it next time we enter this function.
-                    let _ = compare_height::spawn();
-                }
-                DeskToPanelMessage::Unknown(_, _, _, _, _) => {
-                    // do nothing for now
-                }
-            }
-        }
-    }
-
-    fn find_first_frame(buf: &[u8; RX_BUF_SIZE]) -> [u8; DATA_FRAME_SIZE] {
-        let mut frame = [0; DATA_FRAME_SIZE];
-        for (i, x) in buf.iter().enumerate() {
-            if is_start_byte(*x) {
-                frame[0..DATA_FRAME_SIZE].copy_from_slice(&buf[i..i + DATA_FRAME_SIZE]);
-                return frame;
-            }
-        }
-        return [0; DATA_FRAME_SIZE];
+        // Explicitly ignore a failed spawn attempt.
+        // We do not care if we miss an opportunity to potentially send a message
+        // as we will catch it next time we enter this function.
+        let _ = compare_height::spawn();
     }
 
     #[task(local = [no_key_send_count, previous_iteration_height, stable_iteration_count], shared = [current_direction, current_height, target_height], priority = 1, capacity = 1)]
@@ -459,7 +523,7 @@ mod app {
     }
 
     #[task(local = [disp, current_disp_value, disp_last_changed], shared = [current_height, disp_force_on], priority = 1)]
-    fn update_display(ctx: update_display::Context) {
+    fn update_display(mut ctx: update_display::Context) {
         let disp = ctx.local.disp;
         let current_disp_value = ctx.local.current_disp_value;
         let disp_last_changed = ctx.local.disp_last_changed;
