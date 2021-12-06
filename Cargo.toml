@@ -20,3 +20,8 @@ panic-reset = "0.1.0"
 
 #cortex-m-semihosting = "0.3.7"
 #panic-semihosting = "0.5.6"
+
+vari-desk-2020 = "0.1.0"
+
+[patch.crates-io]
+vari-desk-2020 = { git = 'https://github.com/robdimsdale/vari-desk-2020' }

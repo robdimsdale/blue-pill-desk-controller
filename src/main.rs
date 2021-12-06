@@ -3,7 +3,6 @@
 #![no_main]
 #![no_std]
 
-mod protocol;
 // use panic_semihosting as _;
 use panic_reset as _;
 
@@ -41,7 +40,7 @@ mod app {
     };
     use rtic::time::duration::*;
 
-    use crate::protocol::*;
+    use vari_desk_2020::*;
 
     // Buffer size of 32 is the best trade-off between responsiveness and stability.
     // Buffer size of 16 can result in an unnecessarily large number of interrupts and under/overshoots.
