@@ -1,5 +1,3 @@
-//! examples/smallest.rs
-
 #![no_main]
 #![no_std]
 
