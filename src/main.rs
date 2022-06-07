@@ -113,22 +113,23 @@ mod app {
         reset_display_handler: Option<reset_display_mode::SpawnHandle>,
     }
 
+    type DispPins = (PB10<Alternate<OpenDrain>>, PB11<Alternate<OpenDrain>>);
+    type DMAPayload = RxDma<Rx<USART1>, C5>;
+
     #[local]
     struct Local {
         no_key_send_count: u16,
         stable_iteration_count: u16,
         previous_iteration_height: f32,
 
-        recv: Option<Transfer<W, &'static mut [u8; RX_BUF_SIZE], RxDma<Rx<USART1>, C5>>>,
+        recv: Option<Transfer<W, &'static mut [u8; RX_BUF_SIZE], DMAPayload>>,
 
         button_stop: PA4<Input<PullUp>>,
         button1: PA7<Input<PullUp>>,
         button2: PA6<Input<PullUp>>,
         button3: PA5<Input<PullUp>>,
 
-        disp: HT16K33<
-            i2c::BlockingI2c<I2C2, (PB10<Alternate<OpenDrain>>, PB11<Alternate<OpenDrain>>)>,
-        >,
+        disp: HT16K33<i2c::BlockingI2c<I2C2, DispPins>>,
         current_disp_value: f32,
         disp_last_changed: Instant<MyMono>,
 
@@ -136,7 +137,7 @@ mod app {
     }
 
     #[init(local = [rx_buf: [u8; RX_BUF_SIZE] = [0; RX_BUF_SIZE], tx_buf: [u8; TX_BUF_SIZE] = [0; TX_BUF_SIZE]])]
-    fn init(mut ctx: init::Context) -> (Shared, Local, init::Monotonics) {
+    fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
         let mut rcc = ctx.device.RCC.constrain();
         let mut flash = ctx.device.FLASH.constrain();
 
@@ -161,23 +162,23 @@ mod app {
         // Setup buttons
         let mut button_stop = gpioa.pa4.into_pull_up_input(&mut gpioa.crl);
         button_stop.make_interrupt_source(&mut afio);
-        button_stop.enable_interrupt(&mut ctx.device.EXTI);
-        button_stop.trigger_on_edge(&mut ctx.device.EXTI, Edge::FALLING);
+        button_stop.enable_interrupt(&ctx.device.EXTI);
+        button_stop.trigger_on_edge(&ctx.device.EXTI, Edge::FALLING);
 
         let mut button1 = gpioa.pa7.into_pull_up_input(&mut gpioa.crl);
         button1.make_interrupt_source(&mut afio);
-        button1.enable_interrupt(&mut ctx.device.EXTI);
-        button1.trigger_on_edge(&mut ctx.device.EXTI, Edge::FALLING);
+        button1.enable_interrupt(&ctx.device.EXTI);
+        button1.trigger_on_edge(&ctx.device.EXTI, Edge::FALLING);
 
         let mut button2 = gpioa.pa6.into_pull_up_input(&mut gpioa.crl);
         button2.make_interrupt_source(&mut afio);
-        button2.enable_interrupt(&mut ctx.device.EXTI);
-        button2.trigger_on_edge(&mut ctx.device.EXTI, Edge::FALLING);
+        button2.enable_interrupt(&ctx.device.EXTI);
+        button2.trigger_on_edge(&ctx.device.EXTI, Edge::FALLING);
 
         let mut button3 = gpioa.pa5.into_pull_up_input(&mut gpioa.crl);
         button3.make_interrupt_source(&mut afio);
-        button3.enable_interrupt(&mut ctx.device.EXTI);
-        button3.trigger_on_edge(&mut ctx.device.EXTI, Edge::FALLING);
+        button3.enable_interrupt(&ctx.device.EXTI);
+        button3.trigger_on_edge(&ctx.device.EXTI, Edge::FALLING);
 
         // Set up the I2C bus on pins PB6 and PB7 (display)
         let scl = gpiob.pb10.into_alternate_open_drain(&mut gpiob.crh);
@@ -247,11 +248,11 @@ mod app {
                 no_key_send_count: 0,
                 stable_iteration_count: 0,
                 previous_iteration_height: 0.0,
-                button_stop: button_stop,
-                button1: button1,
-                button2: button2,
-                button3: button3,
-                onboard_led: onboard_led,
+                button_stop,
+                button1,
+                button2,
+                button3,
+                onboard_led,
             },
             init::Monotonics(mono),
         )
@@ -302,7 +303,7 @@ mod app {
                 return frame;
             }
         }
-        return [0; DATA_FRAME_SIZE];
+        [0; DATA_FRAME_SIZE]
     }
 
     #[task(local = [no_key_send_count, previous_iteration_height, stable_iteration_count], shared = [current_direction, current_height, target_height], priority = 1, capacity = 1)]
@@ -333,58 +334,55 @@ mod app {
                         *current_direction = None;
                         // }
                     }
-                    _ => match *ctx_target_height {
-                        Some(target_height) => {
+                    _ => {
+                        if let Some(target_height) = *ctx_target_height {
                             if abs_diff_f32(*current_height, target_height)
                                 <= TARGET_HEIGHT_STOP_DIFFERENCE
                                 && stable_iteration_count < MAX_STABLE_ITERATION_COUNT
                             {
                                 message = Some(PanelToDeskMessage::NoKey);
                                 *current_direction = None;
-                            } else {
-                                if *current_height < target_height {
-                                    match current_direction {
-                                        Some(Direction::Down) => {
-                                            *current_direction = Some(Direction::Reversing);
-                                            message = Some(PanelToDeskMessage::NoKey);
-                                        }
-                                        _ => {
-                                            *current_direction = Some(Direction::Up);
-                                            message = Some(PanelToDeskMessage::Up);
-                                        }
-                                    }
-                                } else if *current_height > target_height {
-                                    match current_direction {
-                                        Some(Direction::Up) => {
-                                            *current_direction = Some(Direction::Reversing);
-                                            message = Some(PanelToDeskMessage::NoKey);
-                                        }
-                                        _ => {
-                                            *current_direction = Some(Direction::Down);
-                                            message = Some(PanelToDeskMessage::Down);
-                                        }
-                                    }
-                                } else {
-                                    *current_direction = None;
-
-                                    if stable_iteration_count < MAX_STABLE_ITERATION_COUNT {
+                            } else if *current_height < target_height {
+                                match current_direction {
+                                    Some(Direction::Down) => {
+                                        *current_direction = Some(Direction::Reversing);
                                         message = Some(PanelToDeskMessage::NoKey);
-                                    } else {
-                                        *ctx_target_height = None;
                                     }
-
-                                    // if no_key_send_count < NO_KEY_ITERATION_COUNT {
-                                    //     message = Some(PanelToDeskMessage::NoKey);
-                                    // } else {
-                                    //     *ctx_target_height = None;
-                                    // }
+                                    _ => {
+                                        *current_direction = Some(Direction::Up);
+                                        message = Some(PanelToDeskMessage::Up);
+                                    }
                                 }
+                            } else if *current_height > target_height {
+                                match current_direction {
+                                    Some(Direction::Up) => {
+                                        *current_direction = Some(Direction::Reversing);
+                                        message = Some(PanelToDeskMessage::NoKey);
+                                    }
+                                    _ => {
+                                        *current_direction = Some(Direction::Down);
+                                        message = Some(PanelToDeskMessage::Down);
+                                    }
+                                }
+                            } else {
+                                *current_direction = None;
+
+                                if stable_iteration_count < MAX_STABLE_ITERATION_COUNT {
+                                    message = Some(PanelToDeskMessage::NoKey);
+                                } else {
+                                    *ctx_target_height = None;
+                                }
+
+                                // if no_key_send_count < NO_KEY_ITERATION_COUNT {
+                                //     message = Some(PanelToDeskMessage::NoKey);
+                                // } else {
+                                //     *ctx_target_height = None;
+                                // }
                             }
+                        } else {
+                            // At target height - do nothing
                         }
-                        None => {
-                            // panic!("at target height - rest of code not implemented");
-                        }
-                    },
+                    }
                 }
             });
 
@@ -568,9 +566,8 @@ mod app {
     fn abs_diff_f32(a: f32, b: f32) -> f32 {
         if a > b {
             return a - b;
-        } else {
-            return b - a;
         }
+        b - a
     }
 
     /// Systick implementing `embedded_time::Clock` and `rtic_monotonic::Monotonic` which runs at a
